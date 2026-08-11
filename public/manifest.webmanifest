@@ -1,0 +1,18 @@
+{
+  "name": "보이스패스 - 발성 연습",
+  "short_name": "보이스패스",
+  "description": "5음계 피치 연습과 발성 학습을 돕는 모바일 보컬 트레이닝 앱",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f1f6f4",
+  "theme_color": "#167a68",
+  "icons": [
+    {
+      "src": "./icon-512.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}
