@@ -29,6 +29,8 @@ type PracticeResult = {
   distribution: VoiceProbabilities;
 };
 
+type ReferenceStatus = "idle" | "playing" | "done";
+
 type WebKitAudioWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
 };
@@ -44,6 +46,55 @@ function createAudioContext() {
   } catch {
     return new AudioContextConstructor();
   }
+}
+
+function writeWavText(view: DataView, offset: number, value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
+function createScaleWavUrl(midis: number[], beat: number) {
+  const sampleRate = 44_100;
+  const noteDuration = Math.min(beat * 0.78, beat - 0.04);
+  const totalSamples = Math.ceil((midis.length * beat + 0.08) * sampleRate);
+  const dataSize = totalSamples * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  writeWavText(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeWavText(view, 8, "WAVE");
+  writeWavText(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeWavText(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  for (let sampleIndex = 0; sampleIndex < totalSamples; sampleIndex += 1) {
+    const time = sampleIndex / sampleRate;
+    const noteIndex = Math.floor(time / beat);
+    const noteTime = time - noteIndex * beat;
+    let sample = 0;
+
+    if (noteIndex < midis.length && noteTime < noteDuration) {
+      const frequency = midiToFrequency(midis[noteIndex]);
+      const attack = Math.min(1, noteTime / 0.025);
+      const releaseStart = Math.max(0.04, noteDuration - 0.1);
+      const release = noteTime > releaseStart ? Math.max(0, (noteDuration - noteTime) / 0.1) : 1;
+      const triangle = (2 / Math.PI) * Math.asin(Math.sin(2 * Math.PI * frequency * noteTime));
+      sample = triangle * attack * release * 0.46;
+    }
+
+    view.setInt16(44 + sampleIndex * 2, Math.round(sample * 32_767), true);
+  }
+
+  return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
 }
 
 const voiceDefinitions: VoiceDefinition[] = [
@@ -231,9 +282,12 @@ export function VoicePathApp() {
   const [error, setError] = useState("");
   const [history, setHistory] = useState<PracticeResult[]>([]);
   const [lastResult, setLastResult] = useState<PracticeResult | null>(null);
+  const [referenceStatus, setReferenceStatus] = useState<ReferenceStatus>("idle");
 
   const playbackContextRef = useRef<AudioContext | null>(null);
   const microphoneContextRef = useRef<AudioContext | null>(null);
+  const referenceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const referenceAudioUrlRef = useRef<string | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -299,12 +353,22 @@ export function VoicePathApp() {
     return () => {
       window.clearTimeout(historyTimer);
       document.removeEventListener("visibilitychange", resumePlayback);
-      stopAudio();
+      if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
+      if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      referenceAudioRef.current?.pause();
+      if (referenceAudioUrlRef.current) URL.revokeObjectURL(referenceAudioUrlRef.current);
+      [playbackContextRef, microphoneContextRef].forEach((contextRef) => {
+        if (contextRef.current && contextRef.current.state !== "closed") {
+          contextRef.current.close().catch(() => undefined);
+        }
+      });
     };
   }, []);
 
   function stopAudio() {
     practicingRef.current = false;
+    stopReferenceAudio("idle");
     if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
     intervalRef.current = null;
@@ -318,6 +382,21 @@ export function VoicePathApp() {
       }
       contextRef.current = null;
     });
+  }
+
+  function stopReferenceAudio(nextStatus: ReferenceStatus) {
+    const audio = referenceAudioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (referenceAudioUrlRef.current) URL.revokeObjectURL(referenceAudioUrlRef.current);
+    referenceAudioRef.current = null;
+    referenceAudioUrlRef.current = null;
+    setReferenceStatus(nextStatus);
   }
 
   function calculateCentroid(analyser: AnalyserNode) {
@@ -446,24 +525,30 @@ export function VoicePathApp() {
 
   async function playReferenceScale() {
     setError("");
+    stopReferenceAudio("idle");
+
+    const beat = 60 / tempo;
+    const url = createScaleWavUrl(scaleIntervals.map((interval) => startMidi + setShift + interval), beat);
+    const audio = new Audio(url);
+    audio.preload = "auto";
+    audio.volume = 1;
+    audio.setAttribute("playsinline", "true");
+    audio.setAttribute("webkit-playsinline", "true");
+    referenceAudioRef.current = audio;
+    referenceAudioUrlRef.current = url;
+    setReferenceStatus("playing");
+
+    audio.onended = () => stopReferenceAudio("done");
+    audio.onerror = () => {
+      stopReferenceAudio("idle");
+      setError("기준 음계를 재생하지 못했습니다. 아이폰의 미디어 음량과 출력 기기를 확인해주세요.");
+    };
+
     try {
-      const context = await getPlaybackContext();
-      const beat = 60 / tempo;
-      scaleIntervals.forEach((interval, index) => {
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        const begins = context.currentTime + 0.02 + index * beat;
-        oscillator.type = "triangle";
-        oscillator.frequency.value = midiToFrequency(startMidi + setShift + interval);
-        gain.gain.setValueAtTime(0.0001, begins);
-        gain.gain.exponentialRampToValueAtTime(0.18, begins + 0.025);
-        gain.gain.exponentialRampToValueAtTime(0.0001, begins + beat * 0.72);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(begins);
-        oscillator.stop(begins + beat * 0.76);
-      });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "기준 음계를 재생하지 못했습니다.");
+      await audio.play();
+    } catch {
+      stopReferenceAudio("idle");
+      setError("기준 음계를 재생하지 못했습니다. 아이폰의 미디어 음량과 출력 기기를 확인해주세요.");
     }
   }
 
@@ -660,7 +745,21 @@ export function VoicePathApp() {
                 <label className="tempo-control">속도 <strong>{tempo} BPM</strong>
                   <input type="range" min="56" max="100" step="2" value={tempo} disabled={isPracticing} onChange={(event) => setTempo(Number(event.target.value))} />
                 </label>
-                <button className="secondary-button" type="button" disabled={isPracticing} onClick={playReferenceScale}>기준 음계 듣기</button>
+                <button
+                  className="primary-button reference-button"
+                  type="button"
+                  disabled={isPracticing || referenceStatus === "playing"}
+                  aria-busy={referenceStatus === "playing"}
+                  onClick={playReferenceScale}
+                >
+                  <span className={referenceStatus === "playing" ? "play-indicator playing" : "play-indicator"} aria-hidden="true">
+                    {referenceStatus === "done" ? "↻" : "▶"}
+                  </span>
+                  {referenceStatus === "playing" ? "기준 음계 재생 중…" : referenceStatus === "done" ? "기준 음계 다시 듣기" : "기준 음계 듣기"}
+                </button>
+                <p className={`audio-status ${referenceStatus}`} aria-live="polite">
+                  {referenceStatus === "playing" ? "도–레–미–파–솔–파–미–레–도를 재생하고 있어요." : referenceStatus === "done" ? "기준 음계 재생이 끝났어요." : "버튼을 누르면 아이폰 스피커로 기준 음계가 재생돼요."}
+                </p>
               </article>
 
               <article className="surface-card scale-card">

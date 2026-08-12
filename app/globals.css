@@ -551,8 +551,62 @@ input:focus-visible {
 }
 
 .tempo-control,
-.settings-card .secondary-button {
+.settings-card .reference-button,
+.settings-card .audio-status {
   grid-column: 1 / -1;
+}
+
+.reference-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  transition: transform 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.reference-button:active {
+  transform: scale(0.985);
+  background: var(--brand-dark);
+  box-shadow: 0 4px 10px rgba(22, 122, 104, 0.2);
+}
+
+.reference-button:disabled[aria-busy="true"] {
+  cursor: progress;
+  opacity: 1;
+  background: var(--brand-dark);
+}
+
+.play-indicator {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 0.72rem;
+}
+
+.play-indicator.playing {
+  animation: soundPulse 850ms ease-in-out infinite alternate;
+}
+
+.audio-status {
+  margin: -3px 2px 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.audio-status.playing,
+.audio-status.done {
+  color: var(--brand-dark);
+  font-weight: 750;
+}
+
+@keyframes soundPulse {
+  from { transform: scale(0.86); opacity: 0.72; }
+  to { transform: scale(1.08); opacity: 1; }
 }
 
 .tempo-control strong {
