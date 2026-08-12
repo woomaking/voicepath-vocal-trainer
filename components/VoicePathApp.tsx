@@ -30,6 +30,7 @@ type PracticeResult = {
 };
 
 type ReferenceStatus = "idle" | "playing" | "done";
+type MicrophoneStatus = "idle" | "requesting" | "listening" | "hearing" | "blocked";
 
 type WebKitAudioWindow = Window & {
   webkitAudioContext?: typeof AudioContext;
@@ -203,7 +204,7 @@ function detectPitch(buffer: Float32Array, sampleRate: number) {
   let rms = 0;
   for (let i = 0; i < buffer.length; i += 1) rms += buffer[i] * buffer[i];
   rms = Math.sqrt(rms / buffer.length);
-  if (rms < 0.012) return { frequency: 0, rms };
+  if (rms < 0.006) return { frequency: 0, rms };
 
   const minLag = Math.floor(sampleRate / 1000);
   const maxLag = Math.min(Math.floor(sampleRate / 65), buffer.length - 2);
@@ -229,7 +230,7 @@ function detectPitch(buffer: Float32Array, sampleRate: number) {
     }
   }
 
-  if (bestLag < 0 || bestCorrelation < 0.55) return { frequency: 0, rms };
+  if (bestLag < 0 || bestCorrelation < 0.45) return { frequency: 0, rms };
   return { frequency: sampleRate / bestLag, rms };
 }
 
@@ -283,15 +284,14 @@ export function VoicePathApp() {
   const [history, setHistory] = useState<PracticeResult[]>([]);
   const [lastResult, setLastResult] = useState<PracticeResult | null>(null);
   const [referenceStatus, setReferenceStatus] = useState<ReferenceStatus>("idle");
+  const [microphoneStatus, setMicrophoneStatus] = useState<MicrophoneStatus>("idle");
 
-  const playbackContextRef = useRef<AudioContext | null>(null);
   const microphoneContextRef = useRef<AudioContext | null>(null);
   const referenceAudioRef = useRef<HTMLAudioElement | null>(null);
   const referenceAudioUrlRef = useRef<string | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationRef = useRef<number | null>(null);
-  const intervalRef = useRef<number | null>(null);
   const targetMidiRef = useRef(startMidi);
   const practicingRef = useRef(false);
   const lastUiUpdateRef = useRef(0);
@@ -339,49 +339,46 @@ export function VoicePathApp() {
       navigator.serviceWorker.register("./sw.js").then((registration) => registration.update()).catch(() => undefined);
     }
 
-    const resumePlayback = () => {
+    const resumeMicrophone = () => {
       if (document.visibilityState !== "visible") return;
-      const context = playbackContextRef.current;
+      const context = microphoneContextRef.current;
       if (!context || context.state === "closed") return;
       context.resume().catch(() => {
         context.close().catch(() => undefined);
-        if (playbackContextRef.current === context) playbackContextRef.current = null;
+        if (microphoneContextRef.current === context) microphoneContextRef.current = null;
       });
     };
-    document.addEventListener("visibilitychange", resumePlayback);
+    document.addEventListener("visibilitychange", resumeMicrophone);
 
     return () => {
       window.clearTimeout(historyTimer);
-      document.removeEventListener("visibilitychange", resumePlayback);
-      if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
+      document.removeEventListener("visibilitychange", resumeMicrophone);
       if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       referenceAudioRef.current?.pause();
       if (referenceAudioUrlRef.current) URL.revokeObjectURL(referenceAudioUrlRef.current);
-      [playbackContextRef, microphoneContextRef].forEach((contextRef) => {
-        if (contextRef.current && contextRef.current.state !== "closed") {
-          contextRef.current.close().catch(() => undefined);
-        }
-      });
+      if (microphoneContextRef.current && microphoneContextRef.current.state !== "closed") {
+        microphoneContextRef.current.close().catch(() => undefined);
+      }
     };
   }, []);
 
   function stopAudio() {
     practicingRef.current = false;
     stopReferenceAudio("idle");
-    if (intervalRef.current !== null) window.clearInterval(intervalRef.current);
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
-    intervalRef.current = null;
     animationRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     analyserRef.current = null;
-    [playbackContextRef, microphoneContextRef].forEach((contextRef) => {
-      if (contextRef.current && contextRef.current.state !== "closed") {
-        contextRef.current.close().catch(() => undefined);
-      }
-      contextRef.current = null;
-    });
+    if (microphoneContextRef.current && microphoneContextRef.current.state !== "closed") {
+      microphoneContextRef.current.close().catch(() => undefined);
+    }
+    microphoneContextRef.current = null;
+    setMicrophoneStatus("idle");
+    setInputLevel(0);
+    setDetectedNote("—");
+    setDetectedMidi(null);
   }
 
   function stopReferenceAudio(nextStatus: ReferenceStatus) {
@@ -423,7 +420,9 @@ export function VoicePathApp() {
 
     if (now - lastUiUpdateRef.current > 110) {
       lastUiUpdateRef.current = now;
-      setInputLevel(clamp(Math.round(rms * 900), 0, 100));
+      const nextInputLevel = clamp(Math.round(rms * 1800), 0, 100);
+      setInputLevel(nextInputLevel);
+      setMicrophoneStatus(rms >= 0.006 ? "hearing" : "listening");
 
       if (frequency > 0) {
         const pitch = frequencyToPitch(frequency);
@@ -457,70 +456,43 @@ export function VoicePathApp() {
 
   async function openMicrophone() {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저에서는 마이크 분석을 사용할 수 없습니다.");
+    setMicrophoneStatus("requesting");
     const context = createAudioContext();
     let stream: MediaStream | null = null;
 
     try {
       if (context.state !== "running") await context.resume();
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: true,
+          channelCount: 1,
+        },
       });
       if (context.state !== "running") await context.resume();
       const analyser = context.createAnalyser();
-      analyser.fftSize = 2048;
+      analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = 0.35;
       context.createMediaStreamSource(stream).connect(analyser);
+      const [track] = stream.getAudioTracks();
+      if (!track || track.readyState !== "live") throw new Error("휴대폰 마이크가 연결되지 않았습니다.");
+      track.onended = () => {
+        setMicrophoneStatus("blocked");
+        setError("마이크 연결이 종료됐습니다. 브라우저의 마이크 권한을 확인해주세요.");
+      };
+      track.onmute = () => setMicrophoneStatus("listening");
       microphoneContextRef.current = context;
       analyserRef.current = analyser;
       streamRef.current = stream;
+      setMicrophoneStatus("listening");
       processMicrophone();
     } catch (caught) {
+      setMicrophoneStatus("blocked");
       stream?.getTracks().forEach((track) => track.stop());
       context.close().catch(() => undefined);
       throw caught;
     }
-  }
-
-  async function getPlaybackContext() {
-    let context = playbackContextRef.current;
-    if (!context || context.state === "closed") {
-      context = createAudioContext();
-      playbackContextRef.current = context;
-    }
-
-    try {
-      if (context.state !== "running") await context.resume();
-    } catch {
-      context.close().catch(() => undefined);
-      if (playbackContextRef.current === context) playbackContextRef.current = null;
-      throw new Error("연습음을 시작하지 못했습니다. 화면을 한 번 누른 뒤 다시 시도해주세요.");
-    }
-
-    if (context.state !== "running") {
-      throw new Error("연습음이 일시 정지되어 있습니다. 기준 음계 듣기를 다시 눌러주세요.");
-    }
-
-    const silentBuffer = context.createBuffer(1, 1, context.sampleRate);
-    const silentSource = context.createBufferSource();
-    silentSource.buffer = silentBuffer;
-    silentSource.connect(context.destination);
-    silentSource.start();
-    return context;
-  }
-
-  async function playTone(midi: number, duration = 0.34) {
-    const context = await getPlaybackContext();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const start = context.currentTime + 0.015;
-    oscillator.type = "triangle";
-    oscillator.frequency.value = midiToFrequency(midi);
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.2, start + 0.025);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start(start);
-    oscillator.stop(start + duration + 0.03);
   }
 
   async function playReferenceScale() {
@@ -556,7 +528,6 @@ export function VoicePathApp() {
     setError("");
     try {
       stopAudio();
-      await getPlaybackContext();
       await openMicrophone();
       sessionRef.current = {
         startedAt: Date.now(),
@@ -574,34 +545,25 @@ export function VoicePathApp() {
       setActiveIndex(0);
       setSetShift(0);
       targetMidiRef.current = startMidi;
-      await playTone(startMidi);
-
-      let index = 0;
-      let shift = 0;
-      const beatMilliseconds = Math.round((60 / tempo) * 1000);
-      intervalRef.current = window.setInterval(() => {
-        index += 1;
-        if (index >= scaleIntervals.length) {
-          index = 0;
-          shift += 1;
-        }
-        if (shift >= 6) {
-          finishPractice();
-          return;
-        }
-        const nextMidi = startMidi + shift + scaleIntervals[index];
-        setActiveIndex(index);
-        setSetShift(shift);
-        targetMidiRef.current = nextMidi;
-        void playTone(nextMidi, 0.25).catch((caught) => {
-          setError(caught instanceof Error ? caught.message : "연습음을 재생하지 못했습니다.");
-        });
-      }, beatMilliseconds);
     } catch (caught) {
       stopAudio();
       setIsPracticing(false);
-      setError(caught instanceof Error ? caught.message : "마이크를 시작하지 못했습니다.");
+      if (caught instanceof DOMException && (caught.name === "NotAllowedError" || caught.name === "SecurityError")) {
+        setMicrophoneStatus("blocked");
+        setError("마이크 권한이 꺼져 있습니다. 아이폰 설정 → Safari → 마이크에서 허용한 뒤 다시 눌러주세요.");
+      } else {
+        setError(caught instanceof Error ? caught.message : "마이크를 시작하지 못했습니다.");
+      }
     }
+  }
+
+  function movePracticeNote(direction: -1 | 1) {
+    setActiveIndex((current) => clamp(current + direction, 0, scaleIntervals.length - 1));
+  }
+
+  function movePracticeSet(direction: -1 | 1) {
+    setSetShift((current) => clamp(current + direction, 0, 5));
+    setActiveIndex(0);
   }
 
   function finishPractice() {
@@ -765,15 +727,41 @@ export function VoicePathApp() {
               <article className="surface-card scale-card">
                 <div className="card-topline"><strong>{midiToNote(startMidi + setShift)} 시작 · ‘{vowel}’</strong><span>반음씩 상승</span></div>
                 <div className="scale-path" aria-label="도 레 미 파 솔 파 미 레 도">
-                  {scaleNames.map((name, index) => <span key={`${name}-${index}`} className={activeIndex === index ? "active" : ""}>{name}</span>)}
+                  {scaleNames.map((name, index) => (
+                    <button
+                      type="button"
+                      key={`${name}-${index}`}
+                      className={activeIndex === index ? "active" : ""}
+                      aria-pressed={activeIndex === index}
+                      onClick={() => setActiveIndex(index)}
+                    >{name}</button>
+                  ))}
+                </div>
+                <div className="manual-note-controls" aria-label="목표 음정 수동 이동">
+                  <button type="button" disabled={activeIndex === 0} onClick={() => movePracticeNote(-1)}>← 이전 음</button>
+                  <strong>{targetNote}</strong>
+                  <button type="button" disabled={activeIndex === scaleIntervals.length - 1} onClick={() => movePracticeNote(1)}>다음 음 →</button>
+                </div>
+                <div className="manual-set-controls" aria-label="연습 세트 수동 이동">
+                  <button type="button" disabled={setShift === 0} onClick={() => movePracticeSet(-1)}>− 이전 세트</button>
+                  <span>세트는 직접 눌러야 바뀝니다</span>
+                  <button type="button" disabled={setShift === 5} onClick={() => movePracticeSet(1)}>다음 세트 +반음</button>
                 </div>
               </article>
 
               <article className="pitch-card">
+                {isPracticing && (
+                  <div className={`microphone-status ${microphoneStatus}`} role="status">
+                    <span aria-hidden="true" />
+                    <strong>{microphoneStatus === "requesting" ? "마이크 연결 중" : microphoneStatus === "hearing" ? "목소리 감지 중" : microphoneStatus === "blocked" ? "마이크 확인 필요" : "마이크 연결됨"}</strong>
+                  </div>
+                )}
                 <span>목표 음정</span><h2>{targetNote}</h2>
                 <div className="pitch-track"><span className="pitch-marker" style={{ "--pitch-position": `${clamp(50 + (pitchDifference ?? 0) / 2, 4, 96)}%` } as CSSProperties} /></div>
                 <div className="pitch-labels"><span>낮음</span><strong>{pitchDifference === null ? "소리를 기다리는 중" : Math.abs(pitchDifference) <= 15 ? `${pitchDifference >= 0 ? "+" : ""}${pitchDifference} cent · 정확해요` : pitchDifference < 0 ? `${pitchDifference} cent · 조금 높여보세요` : `+${pitchDifference} cent · 조금 낮춰보세요`}</strong><span>높음</span></div>
                 <div className="detected-row"><span>현재 음정</span><strong>{detectedNote}</strong><span>입력 {inputLevel}%</span></div>
+                <div className="microphone-level" aria-label={`마이크 입력 세기 ${inputLevel}퍼센트`}><span style={{ width: `${inputLevel}%` }} /></div>
+                {isPracticing && detectedMidi === null && <p className="microphone-tip">휴대폰 아래쪽 마이크를 막지 말고 ‘아—’ 또는 ‘우—’를 1~2초 길게 내보세요.</p>}
               </article>
 
               <article className="surface-card voice-estimate">
@@ -787,6 +775,7 @@ export function VoicePathApp() {
               {error && <p className="error-message" role="alert">{error}</p>}
               <div className="practice-actions">
                 {isPracticing ? <button className="stop-button" type="button" onClick={finishPractice}>연습 종료·분석</button> : <button className="primary-button" type="button" onClick={startPractice}>마이크 연습 시작</button>}
+                <p className="silent-practice-note">마이크 연습 중에는 배경음이 나오지 않으며 음정도 자동으로 바뀌지 않습니다.</p>
               </div>
             </section>
           )}

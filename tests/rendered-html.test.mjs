@@ -29,15 +29,19 @@ test("server-renders the VoicePath vocal training app", async () => {
 });
 
 test("starter preview is removed and product metadata is present", async () => {
-  const [page, layout, packageJson] = await Promise.all([
+  const [page, layout, packageJson, voicePathApp] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../components/VoicePathApp.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /VoicePathApp/);
   assert.match(layout, /보이스패스/);
   assert.match(layout, /lang="ko"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+  assert.match(voicePathApp, /마이크 연습 중에는 배경음이 나오지 않으며 음정도 자동으로 바뀌지 않습니다/);
+  assert.match(voicePathApp, /다음 세트 \+반음/);
+  assert.doesNotMatch(voicePathApp, /setInterval|createOscillator|playTone\(/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
 });
