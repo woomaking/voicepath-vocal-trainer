@@ -29,6 +29,23 @@ type PracticeResult = {
   distribution: VoiceProbabilities;
 };
 
+type WebKitAudioWindow = Window & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
+function createAudioContext() {
+  const AudioContextConstructor = window.AudioContext ?? (window as WebKitAudioWindow).webkitAudioContext;
+  if (!AudioContextConstructor) {
+    throw new Error("이 브라우저에서는 연습음을 재생할 수 없습니다.");
+  }
+
+  try {
+    return new AudioContextConstructor({ latencyHint: "interactive" });
+  } catch {
+    return new AudioContextConstructor();
+  }
+}
+
 const voiceDefinitions: VoiceDefinition[] = [
   {
     key: "chest",
@@ -215,7 +232,8 @@ export function VoicePathApp() {
   const [history, setHistory] = useState<PracticeResult[]>([]);
   const [lastResult, setLastResult] = useState<PracticeResult | null>(null);
 
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const microphoneContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animationRef = useRef<number | null>(null);
@@ -264,11 +282,23 @@ export function VoicePathApp() {
     }, 0);
 
     if ("serviceWorker" in navigator && window.location.protocol === "https:") {
-      navigator.serviceWorker.register("./sw.js").catch(() => undefined);
+      navigator.serviceWorker.register("./sw.js").then((registration) => registration.update()).catch(() => undefined);
     }
+
+    const resumePlayback = () => {
+      if (document.visibilityState !== "visible") return;
+      const context = playbackContextRef.current;
+      if (!context || context.state === "closed") return;
+      context.resume().catch(() => {
+        context.close().catch(() => undefined);
+        if (playbackContextRef.current === context) playbackContextRef.current = null;
+      });
+    };
+    document.addEventListener("visibilitychange", resumePlayback);
 
     return () => {
       window.clearTimeout(historyTimer);
+      document.removeEventListener("visibilitychange", resumePlayback);
       stopAudio();
     };
   }, []);
@@ -282,10 +312,12 @@ export function VoicePathApp() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     analyserRef.current = null;
-    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
-      audioContextRef.current.close().catch(() => undefined);
-    }
-    audioContextRef.current = null;
+    [playbackContextRef, microphoneContextRef].forEach((contextRef) => {
+      if (contextRef.current && contextRef.current.state !== "closed") {
+        contextRef.current.close().catch(() => undefined);
+      }
+      contextRef.current = null;
+    });
   }
 
   function calculateCentroid(analyser: AnalyserNode) {
@@ -346,68 +378,100 @@ export function VoicePathApp() {
 
   async function openMicrophone() {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저에서는 마이크 분석을 사용할 수 없습니다.");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
-    const context = new AudioContext();
-    await context.resume();
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.35;
-    context.createMediaStreamSource(stream).connect(analyser);
-    audioContextRef.current = context;
-    analyserRef.current = analyser;
-    streamRef.current = stream;
-    processMicrophone();
+    const context = createAudioContext();
+    let stream: MediaStream | null = null;
+
+    try {
+      if (context.state !== "running") await context.resume();
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+      if (context.state !== "running") await context.resume();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.35;
+      context.createMediaStreamSource(stream).connect(analyser);
+      microphoneContextRef.current = context;
+      analyserRef.current = analyser;
+      streamRef.current = stream;
+      processMicrophone();
+    } catch (caught) {
+      stream?.getTracks().forEach((track) => track.stop());
+      context.close().catch(() => undefined);
+      throw caught;
+    }
   }
 
-  function playTone(midi: number, duration = 0.34) {
-    let context = audioContextRef.current;
+  async function getPlaybackContext() {
+    let context = playbackContextRef.current;
     if (!context || context.state === "closed") {
-      context = new AudioContext();
-      audioContextRef.current = context;
+      context = createAudioContext();
+      playbackContextRef.current = context;
     }
-    context.resume().catch(() => undefined);
+
+    try {
+      if (context.state !== "running") await context.resume();
+    } catch {
+      context.close().catch(() => undefined);
+      if (playbackContextRef.current === context) playbackContextRef.current = null;
+      throw new Error("연습음을 시작하지 못했습니다. 화면을 한 번 누른 뒤 다시 시도해주세요.");
+    }
+
+    if (context.state !== "running") {
+      throw new Error("연습음이 일시 정지되어 있습니다. 기준 음계 듣기를 다시 눌러주세요.");
+    }
+
+    const silentBuffer = context.createBuffer(1, 1, context.sampleRate);
+    const silentSource = context.createBufferSource();
+    silentSource.buffer = silentBuffer;
+    silentSource.connect(context.destination);
+    silentSource.start();
+    return context;
+  }
+
+  async function playTone(midi: number, duration = 0.34) {
+    const context = await getPlaybackContext();
     const oscillator = context.createOscillator();
     const gain = context.createGain();
-    const start = context.currentTime;
-    oscillator.type = "sine";
+    const start = context.currentTime + 0.015;
+    oscillator.type = "triangle";
     oscillator.frequency.value = midiToFrequency(midi);
     gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.15, start + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.2, start + 0.025);
     gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     oscillator.connect(gain).connect(context.destination);
     oscillator.start(start);
     oscillator.stop(start + duration + 0.03);
   }
 
-  function playReferenceScale() {
-    let context = audioContextRef.current;
-    if (!context || context.state === "closed") {
-      context = new AudioContext();
-      audioContextRef.current = context;
+  async function playReferenceScale() {
+    setError("");
+    try {
+      const context = await getPlaybackContext();
+      const beat = 60 / tempo;
+      scaleIntervals.forEach((interval, index) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const begins = context.currentTime + 0.02 + index * beat;
+        oscillator.type = "triangle";
+        oscillator.frequency.value = midiToFrequency(startMidi + setShift + interval);
+        gain.gain.setValueAtTime(0.0001, begins);
+        gain.gain.exponentialRampToValueAtTime(0.18, begins + 0.025);
+        gain.gain.exponentialRampToValueAtTime(0.0001, begins + beat * 0.72);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(begins);
+        oscillator.stop(begins + beat * 0.76);
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "기준 음계를 재생하지 못했습니다.");
     }
-    context.resume().catch(() => undefined);
-    const beat = 60 / tempo;
-    scaleIntervals.forEach((interval, index) => {
-      const oscillator = context!.createOscillator();
-      const gain = context!.createGain();
-      const begins = context!.currentTime + index * beat;
-      oscillator.type = "sine";
-      oscillator.frequency.value = midiToFrequency(startMidi + setShift + interval);
-      gain.gain.setValueAtTime(0.0001, begins);
-      gain.gain.exponentialRampToValueAtTime(0.13, begins + 0.025);
-      gain.gain.exponentialRampToValueAtTime(0.0001, begins + beat * 0.72);
-      oscillator.connect(gain).connect(context!.destination);
-      oscillator.start(begins);
-      oscillator.stop(begins + beat * 0.76);
-    });
   }
 
   async function startPractice() {
     setError("");
     try {
       stopAudio();
+      await getPlaybackContext();
       await openMicrophone();
       sessionRef.current = {
         startedAt: Date.now(),
@@ -425,7 +489,7 @@ export function VoicePathApp() {
       setActiveIndex(0);
       setSetShift(0);
       targetMidiRef.current = startMidi;
-      playTone(startMidi);
+      await playTone(startMidi);
 
       let index = 0;
       let shift = 0;
@@ -444,7 +508,9 @@ export function VoicePathApp() {
         setActiveIndex(index);
         setSetShift(shift);
         targetMidiRef.current = nextMidi;
-        playTone(nextMidi, 0.25);
+        void playTone(nextMidi, 0.25).catch((caught) => {
+          setError(caught instanceof Error ? caught.message : "연습음을 재생하지 못했습니다.");
+        });
       }, beatMilliseconds);
     } catch (caught) {
       stopAudio();
