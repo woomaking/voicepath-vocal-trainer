@@ -7,8 +7,8 @@ export const metadata: Metadata = {
   description: "5음계 피치 연습과 흉성·중성·두성·가성 발성 학습을 돕는 모바일 보컬 트레이닝 앱",
   manifest: "/manifest.webmanifest",
   icons: {
-    icon: "/icon-512.jpg",
-    apple: "/icon-512.jpg",
+    icon: "/voicepath-icon-192.png",
+    apple: "/apple-touch-icon.png",
   },
   openGraph: {
     title: "보이스패스 | 발성 연습",
