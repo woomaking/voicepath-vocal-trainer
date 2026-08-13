@@ -1636,6 +1636,108 @@ input:focus-visible {
   margin-top: 0;
 }
 
+.note-pitch-list {
+  padding: 16px;
+}
+
+.note-alignment-copy {
+  margin: 0 0 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: var(--soft-green);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.note-pitch-row {
+  padding: 15px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.note-pitch-row:last-child {
+  padding-bottom: 2px;
+  border-bottom: 0;
+}
+
+.note-pitch-title {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.note-pitch-title > span {
+  display: grid;
+  gap: 2px;
+}
+
+.note-pitch-title b {
+  font-size: 16px;
+}
+
+.note-pitch-title small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.note-pitch-title > strong {
+  font-size: 13px;
+}
+
+.note-pitch-title em {
+  min-width: 72px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  text-align: center;
+}
+
+.note-pitch-title em.in-tune {
+  background: var(--soft-green);
+  color: var(--green-dark);
+}
+
+.note-pitch-title em.needs-work {
+  background: #fff2e8;
+  color: #a24c19;
+}
+
+.note-pitch-scores {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.note-pitch-scores b {
+  color: var(--ink);
+}
+
+.dual-score-bars {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.dual-score-bars span {
+  display: block;
+  height: 4px;
+  min-width: 2px;
+  border-radius: 999px;
+  background: var(--green);
+}
+
+.dual-score-bars span + span {
+  background: #79a8db;
+}
+
 @media (max-width: 359px) {
   .note-choice-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1660,5 +1762,14 @@ input:focus-visible {
 
   .acoustic-table dd {
     text-align: left;
+  }
+
+  .note-pitch-title {
+    grid-template-columns: 1fr auto;
+  }
+
+  .note-pitch-title em {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 }

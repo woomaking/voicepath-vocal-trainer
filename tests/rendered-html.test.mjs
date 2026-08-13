@@ -51,6 +51,9 @@ test("starter preview is removed and product metadata is present", async () => {
   assert.match(practiceLab, /소리가 너무 작음/);
   assert.match(practiceLab, /휴대폰 위치가 크게 변함/);
   assert.match(practiceLab, /녹음 중에는 배경음이 나오지 않으며 다음 세트도 자동으로 올라가지 않아요/);
+  assert.match(practiceLab, /음별 피치 비교/);
+  assert.match(practiceLab, /녹음 후 순서 정렬/);
+  assert.match(practiceLab, /alignPitchSequence/);
   assert.doesNotMatch(voicePathApp, /setInterval|createOscillator|playTone\(/);
   assert.doesNotMatch(practiceLab, /setInterval|createOscillator|playTone\(/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
