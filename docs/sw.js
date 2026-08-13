@@ -1,4 +1,4 @@
-const CACHE_NAME = "voicepath-v5";
+const CACHE_NAME = "voicepath-v6";
 
 self.addEventListener("install", () => self.skipWaiting());
 

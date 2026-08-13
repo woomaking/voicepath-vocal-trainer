@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  AnalysisExperience,
+  PracticeLab,
+  type PracticeResult,
+  type TrainingVoice,
+} from "./PracticeLab";
 
 type Tab = "home" | "learn" | "practice" | "analysis" | "history";
-type VoiceKey = "chest" | "middle" | "head" | "falsetto" | "mix";
 
 type VoiceDefinition = {
-  key: VoiceKey;
+  key: TrainingVoice;
   name: string;
   kind: string;
   body: string;
@@ -14,89 +19,6 @@ type VoiceDefinition = {
   check: string;
   caution: string;
 };
-
-type VoiceProbabilities = Record<"chest" | "middle" | "head" | "falsetto", number>;
-
-type PracticeResult = {
-  id: string;
-  date: string;
-  score: number;
-  pitchAccuracy: number;
-  connection: number;
-  stability: number;
-  durationSeconds: number;
-  range: string;
-  distribution: VoiceProbabilities;
-};
-
-type ReferenceStatus = "idle" | "playing" | "done";
-type MicrophoneStatus = "idle" | "requesting" | "listening" | "hearing" | "blocked";
-
-type WebKitAudioWindow = Window & {
-  webkitAudioContext?: typeof AudioContext;
-};
-
-function createAudioContext() {
-  const AudioContextConstructor = window.AudioContext ?? (window as WebKitAudioWindow).webkitAudioContext;
-  if (!AudioContextConstructor) {
-    throw new Error("이 브라우저에서는 연습음을 재생할 수 없습니다.");
-  }
-
-  try {
-    return new AudioContextConstructor({ latencyHint: "interactive" });
-  } catch {
-    return new AudioContextConstructor();
-  }
-}
-
-function writeWavText(view: DataView, offset: number, value: string) {
-  for (let index = 0; index < value.length; index += 1) {
-    view.setUint8(offset + index, value.charCodeAt(index));
-  }
-}
-
-function createScaleWavUrl(midis: number[], beat: number) {
-  const sampleRate = 44_100;
-  const noteDuration = Math.min(beat * 0.78, beat - 0.04);
-  const totalSamples = Math.ceil((midis.length * beat + 0.08) * sampleRate);
-  const dataSize = totalSamples * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  writeWavText(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeWavText(view, 8, "WAVE");
-  writeWavText(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeWavText(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  for (let sampleIndex = 0; sampleIndex < totalSamples; sampleIndex += 1) {
-    const time = sampleIndex / sampleRate;
-    const noteIndex = Math.floor(time / beat);
-    const noteTime = time - noteIndex * beat;
-    let sample = 0;
-
-    if (noteIndex < midis.length && noteTime < noteDuration) {
-      const frequency = midiToFrequency(midis[noteIndex]);
-      const attack = Math.min(1, noteTime / 0.025);
-      const releaseStart = Math.max(0.04, noteDuration - 0.1);
-      const release = noteTime > releaseStart ? Math.max(0, (noteDuration - noteTime) / 0.1) : 1;
-      const triangle = (2 / Math.PI) * Math.asin(Math.sin(2 * Math.PI * frequency * noteTime));
-      sample = triangle * attack * release * 0.46;
-    }
-
-    view.setInt16(44 + sampleIndex * 2, Math.round(sample * 32_767), true);
-  }
-
-  return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
-}
 
 const voiceDefinitions: VoiceDefinition[] = [
   {
@@ -174,162 +96,32 @@ const navItems: { key: Tab; label: string; icon: string }[] = [
   { key: "history", label: "기록", icon: "◷" },
 ];
 
-const scaleIntervals = [0, 2, 4, 5, 7, 5, 4, 2, 0];
-const scaleNames = ["도", "레", "미", "파", "솔", "파", "미", "레", "도"];
-const noteNames = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
-const koreanVoiceNames = { chest: "흉성", middle: "중성", head: "두성", falsetto: "가성" };
-
-const emptyProbabilities: VoiceProbabilities = { chest: 25, middle: 25, head: 25, falsetto: 25 };
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function midiToFrequency(midi: number) {
-  return 440 * 2 ** ((midi - 69) / 12);
-}
-
-function midiToNote(midi: number) {
-  const rounded = Math.round(midi);
-  return `${noteNames[((rounded % 12) + 12) % 12]}${Math.floor(rounded / 12) - 1}`;
-}
-
-function frequencyToPitch(frequency: number) {
-  const exactMidi = 69 + 12 * Math.log2(frequency / 440);
-  const midi = Math.round(exactMidi);
-  return { midi, note: midiToNote(midi), cents: Math.round((exactMidi - midi) * 100) };
-}
-
-function detectPitch(buffer: Float32Array, sampleRate: number) {
-  let rms = 0;
-  for (let i = 0; i < buffer.length; i += 1) rms += buffer[i] * buffer[i];
-  rms = Math.sqrt(rms / buffer.length);
-  if (rms < 0.006) return { frequency: 0, rms };
-
-  const minLag = Math.floor(sampleRate / 1000);
-  const maxLag = Math.min(Math.floor(sampleRate / 65), buffer.length - 2);
-  let bestLag = -1;
-  let bestCorrelation = 0;
-
-  for (let lag = minLag; lag <= maxLag; lag += 1) {
-    let correlation = 0;
-    let energyA = 0;
-    let energyB = 0;
-    const length = buffer.length - lag;
-    for (let i = 0; i < length; i += 2) {
-      const a = buffer[i];
-      const b = buffer[i + lag];
-      correlation += a * b;
-      energyA += a * a;
-      energyB += b * b;
-    }
-    const normalized = correlation / Math.sqrt(energyA * energyB || 1);
-    if (normalized > bestCorrelation) {
-      bestCorrelation = normalized;
-      bestLag = lag;
-    }
-  }
-
-  if (bestLag < 0 || bestCorrelation < 0.45) return { frequency: 0, rms };
-  return { frequency: sampleRate / bestLag, rms };
-}
-
-function classifyVoice(midi: number, rms: number, centroid: number, startMidi: number): VoiceProbabilities {
-  const relative = midi - startMidi;
-  const chest = clamp(1.15 - relative / 9, 0.08, 1.1) + clamp((rms - 0.03) * 5, 0, 0.28);
-  const middle = Math.exp(-((relative - 6) ** 2) / 20) + 0.15;
-  const highPitch = clamp((relative - 6) / 8, 0, 1);
-  const head = 0.2 + highPitch * 0.95 + clamp((rms - 0.025) * 2, 0, 0.12);
-  const breathy = clamp((0.045 - rms) * 12, 0, 0.5) + clamp((centroid - 1500) / 3000, 0, 0.35);
-  const falsetto = 0.08 + highPitch * 0.42 + breathy;
-  const scores = { chest, middle, head, falsetto };
-  const total = Object.values(scores).reduce((sum, value) => sum + value, 0);
-  return {
-    chest: Math.round((scores.chest / total) * 100),
-    middle: Math.round((scores.middle / total) * 100),
-    head: Math.round((scores.head / total) * 100),
-    falsetto: 0,
-  } as VoiceProbabilities;
-}
-
-function normalizedProbabilities(probabilities: VoiceProbabilities) {
-  const used = probabilities.chest + probabilities.middle + probabilities.head;
-  return { ...probabilities, falsetto: Math.max(0, 100 - used) };
-}
-
-function getTopVoice(probabilities: VoiceProbabilities) {
-  return (Object.entries(probabilities) as [keyof VoiceProbabilities, number][]).sort((a, b) => b[1] - a[1])[0][0];
-}
-
-function formatDuration(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}분 ${String(seconds % 60).padStart(2, "0")}초`;
+function resultSummary(result: PracticeResult) {
+  if (result.quality && !result.quality.reliable) return "측정 품질이 부족해 재측정이 필요해요.";
+  return result.connection >= 75
+    ? "성구 전환이 비교적 부드럽게 이어졌어요."
+    : "중성 구간에서 볼륨을 줄이며 연결해보세요.";
 }
 
 export function VoicePathApp() {
   const [activeTab, setActiveTab] = useState<Tab>("home");
-  const [selectedVoice, setSelectedVoice] = useState<VoiceKey>("chest");
-  const [startMidi, setStartMidi] = useState(60);
-  const [tempo, setTempo] = useState(76);
-  const [vowel, setVowel] = useState("우");
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [setShift, setSetShift] = useState(0);
-  const [isPracticing, setIsPracticing] = useState(false);
-  const [detectedNote, setDetectedNote] = useState("—");
-  const [detectedMidi, setDetectedMidi] = useState<number | null>(null);
-  const [cents, setCents] = useState(0);
-  const [inputLevel, setInputLevel] = useState(0);
-  const [probabilities, setProbabilities] = useState<VoiceProbabilities>(emptyProbabilities);
-  const [error, setError] = useState("");
+  const [selectedVoice, setSelectedVoice] = useState<TrainingVoice>("chest");
   const [history, setHistory] = useState<PracticeResult[]>([]);
   const [lastResult, setLastResult] = useState<PracticeResult | null>(null);
-  const [referenceStatus, setReferenceStatus] = useState<ReferenceStatus>("idle");
-  const [microphoneStatus, setMicrophoneStatus] = useState<MicrophoneStatus>("idle");
-
-  const microphoneContextRef = useRef<AudioContext | null>(null);
-  const referenceAudioRef = useRef<HTMLAudioElement | null>(null);
-  const referenceAudioUrlRef = useRef<string | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const animationRef = useRef<number | null>(null);
-  const targetMidiRef = useRef(startMidi);
-  const practicingRef = useRef(false);
-  const lastUiUpdateRef = useRef(0);
-  const lastVoiceRef = useRef<keyof VoiceProbabilities | null>(null);
-  const sessionRef = useRef({
-    startedAt: 0,
-    frames: 0,
-    centsTotal: 0,
-    centsSquared: 0,
-    flips: 0,
-    minMidi: 200,
-    maxMidi: 0,
-    counts: { chest: 0, middle: 0, head: 0, falsetto: 0 } as VoiceProbabilities,
-  });
 
   const selectedDefinition = useMemo(
     () => voiceDefinitions.find((item) => item.key === selectedVoice) ?? voiceDefinitions[0],
     [selectedVoice],
   );
 
-  const targetMidi = startMidi + setShift + scaleIntervals[activeIndex];
-  const targetNote = midiToNote(targetMidi);
-  const topVoice = getTopVoice(probabilities);
-  const pitchDifference = detectedMidi === null ? null : Math.round((detectedMidi - targetMidi) * 100 + cents);
-
-  useEffect(() => {
-    targetMidiRef.current = targetMidi;
-  }, [targetMidi]);
-
   useEffect(() => {
     const historyTimer = window.setTimeout(() => {
       try {
         const saved = localStorage.getItem("voicepath-history");
-        if (saved) {
-          const parsed = JSON.parse(saved) as PracticeResult[];
-          setHistory(parsed);
-          setLastResult(parsed[0] ?? null);
-        }
+        if (!saved) return;
+        const parsed = JSON.parse(saved) as PracticeResult[];
+        setHistory(parsed);
+        setLastResult(parsed[0] ?? null);
       } catch {
         localStorage.removeItem("voicepath-history");
       }
@@ -339,267 +131,20 @@ export function VoicePathApp() {
       navigator.serviceWorker.register("./sw.js").then((registration) => registration.update()).catch(() => undefined);
     }
 
-    const resumeMicrophone = () => {
-      if (document.visibilityState !== "visible") return;
-      const context = microphoneContextRef.current;
-      if (!context || context.state === "closed") return;
-      context.resume().catch(() => {
-        context.close().catch(() => undefined);
-        if (microphoneContextRef.current === context) microphoneContextRef.current = null;
-      });
-    };
-    document.addEventListener("visibilitychange", resumeMicrophone);
-
-    return () => {
-      window.clearTimeout(historyTimer);
-      document.removeEventListener("visibilitychange", resumeMicrophone);
-      if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      referenceAudioRef.current?.pause();
-      if (referenceAudioUrlRef.current) URL.revokeObjectURL(referenceAudioUrlRef.current);
-      if (microphoneContextRef.current && microphoneContextRef.current.state !== "closed") {
-        microphoneContextRef.current.close().catch(() => undefined);
-      }
-    };
+    return () => window.clearTimeout(historyTimer);
   }, []);
 
-  function stopAudio() {
-    practicingRef.current = false;
-    stopReferenceAudio("idle");
-    if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
-    animationRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    analyserRef.current = null;
-    if (microphoneContextRef.current && microphoneContextRef.current.state !== "closed") {
-      microphoneContextRef.current.close().catch(() => undefined);
-    }
-    microphoneContextRef.current = null;
-    setMicrophoneStatus("idle");
-    setInputLevel(0);
-    setDetectedNote("—");
-    setDetectedMidi(null);
+  function goTo(tab: Tab) {
+    setActiveTab(tab);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function stopReferenceAudio(nextStatus: ReferenceStatus) {
-    const audio = referenceAudioRef.current;
-    if (audio) {
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-    }
-    if (referenceAudioUrlRef.current) URL.revokeObjectURL(referenceAudioUrlRef.current);
-    referenceAudioRef.current = null;
-    referenceAudioUrlRef.current = null;
-    setReferenceStatus(nextStatus);
-  }
-
-  function calculateCentroid(analyser: AnalyserNode) {
-    const spectrum = new Float32Array(analyser.frequencyBinCount);
-    analyser.getFloatFrequencyData(spectrum);
-    let weighted = 0;
-    let total = 0;
-    const resolution = analyser.context.sampleRate / analyser.fftSize;
-    for (let i = 1; i < spectrum.length; i += 2) {
-      const power = 10 ** (spectrum[i] / 10);
-      weighted += i * resolution * power;
-      total += power;
-    }
-    return total > 0 ? weighted / total : 0;
-  }
-
-  function processMicrophone() {
-    const analyser = analyserRef.current;
-    if (!analyser) return;
-    const waveform = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(waveform);
-    const { frequency, rms } = detectPitch(waveform, analyser.context.sampleRate);
-    const now = performance.now();
-
-    if (now - lastUiUpdateRef.current > 110) {
-      lastUiUpdateRef.current = now;
-      const nextInputLevel = clamp(Math.round(rms * 1800), 0, 100);
-      setInputLevel(nextInputLevel);
-      setMicrophoneStatus(rms >= 0.006 ? "hearing" : "listening");
-
-      if (frequency > 0) {
-        const pitch = frequencyToPitch(frequency);
-        const centroid = calculateCentroid(analyser);
-        const nextProbabilities = normalizedProbabilities(classifyVoice(pitch.midi, rms, centroid, startMidi));
-        const voice = getTopVoice(nextProbabilities);
-        setDetectedNote(pitch.note);
-        setDetectedMidi(pitch.midi);
-        setCents(pitch.cents);
-        setProbabilities(nextProbabilities);
-
-        if (practicingRef.current) {
-          const session = sessionRef.current;
-          const difference = Math.abs((pitch.midi - targetMidiRef.current) * 100 + pitch.cents);
-          session.frames += 1;
-          session.centsTotal += difference;
-          session.centsSquared += difference * difference;
-          session.minMidi = Math.min(session.minMidi, pitch.midi);
-          session.maxMidi = Math.max(session.maxMidi, pitch.midi);
-          session.counts[voice] += 1;
-          if (lastVoiceRef.current && lastVoiceRef.current !== voice) session.flips += 1;
-          lastVoiceRef.current = voice;
-        }
-      } else {
-        setDetectedNote("—");
-        setDetectedMidi(null);
-      }
-    }
-    animationRef.current = requestAnimationFrame(processMicrophone);
-  }
-
-  async function openMicrophone() {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저에서는 마이크 분석을 사용할 수 없습니다.");
-    setMicrophoneStatus("requesting");
-    const context = createAudioContext();
-    let stream: MediaStream | null = null;
-
-    try {
-      if (context.state !== "running") await context.resume();
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-      if (context.state !== "running") await context.resume();
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 4096;
-      analyser.smoothingTimeConstant = 0.35;
-      context.createMediaStreamSource(stream).connect(analyser);
-      const [track] = stream.getAudioTracks();
-      if (!track || track.readyState !== "live") throw new Error("휴대폰 마이크가 연결되지 않았습니다.");
-      track.onended = () => {
-        setMicrophoneStatus("blocked");
-        setError("마이크 연결이 종료됐습니다. 브라우저의 마이크 권한을 확인해주세요.");
-      };
-      track.onmute = () => setMicrophoneStatus("listening");
-      microphoneContextRef.current = context;
-      analyserRef.current = analyser;
-      streamRef.current = stream;
-      setMicrophoneStatus("listening");
-      processMicrophone();
-    } catch (caught) {
-      setMicrophoneStatus("blocked");
-      stream?.getTracks().forEach((track) => track.stop());
-      context.close().catch(() => undefined);
-      throw caught;
-    }
-  }
-
-  async function playReferenceScale() {
-    setError("");
-    stopReferenceAudio("idle");
-
-    const beat = 60 / tempo;
-    const url = createScaleWavUrl(scaleIntervals.map((interval) => startMidi + setShift + interval), beat);
-    const audio = new Audio(url);
-    audio.preload = "auto";
-    audio.volume = 1;
-    audio.setAttribute("playsinline", "true");
-    audio.setAttribute("webkit-playsinline", "true");
-    referenceAudioRef.current = audio;
-    referenceAudioUrlRef.current = url;
-    setReferenceStatus("playing");
-
-    audio.onended = () => stopReferenceAudio("done");
-    audio.onerror = () => {
-      stopReferenceAudio("idle");
-      setError("기준 음계를 재생하지 못했습니다. 아이폰의 미디어 음량과 출력 기기를 확인해주세요.");
-    };
-
-    try {
-      await audio.play();
-    } catch {
-      stopReferenceAudio("idle");
-      setError("기준 음계를 재생하지 못했습니다. 아이폰의 미디어 음량과 출력 기기를 확인해주세요.");
-    }
-  }
-
-  async function startPractice() {
-    setError("");
-    try {
-      stopAudio();
-      await openMicrophone();
-      sessionRef.current = {
-        startedAt: Date.now(),
-        frames: 0,
-        centsTotal: 0,
-        centsSquared: 0,
-        flips: 0,
-        minMidi: 200,
-        maxMidi: 0,
-        counts: { chest: 0, middle: 0, head: 0, falsetto: 0 },
-      };
-      lastVoiceRef.current = null;
-      practicingRef.current = true;
-      setIsPracticing(true);
-      setActiveIndex(0);
-      setSetShift(0);
-      targetMidiRef.current = startMidi;
-    } catch (caught) {
-      stopAudio();
-      setIsPracticing(false);
-      if (caught instanceof DOMException && (caught.name === "NotAllowedError" || caught.name === "SecurityError")) {
-        setMicrophoneStatus("blocked");
-        setError("마이크 권한이 꺼져 있습니다. 아이폰 설정 → Safari → 마이크에서 허용한 뒤 다시 눌러주세요.");
-      } else {
-        setError(caught instanceof Error ? caught.message : "마이크를 시작하지 못했습니다.");
-      }
-    }
-  }
-
-  function movePracticeNote(direction: -1 | 1) {
-    setActiveIndex((current) => clamp(current + direction, 0, scaleIntervals.length - 1));
-  }
-
-  function movePracticeSet(direction: -1 | 1) {
-    setSetShift((current) => clamp(current + direction, 0, 5));
-    setActiveIndex(0);
-  }
-
-  function finishPractice() {
-    const session = sessionRef.current;
-    stopAudio();
-    setIsPracticing(false);
-    const frames = Math.max(session.frames, 1);
-    const averageError = session.centsTotal / frames;
-    const variance = Math.max(0, session.centsSquared / frames - averageError ** 2);
-    const pitchAccuracy = Math.round(clamp(100 - averageError * 0.85, 0, 100));
-    const stability = Math.round(clamp(100 - Math.sqrt(variance) * 0.75, 0, 100));
-    const connection = Math.round(clamp(100 - (session.flips / frames) * 260, 0, 100));
-    const totalVoices = Math.max(1, Object.values(session.counts).reduce((sum, value) => sum + value, 0));
-    const distribution = Object.fromEntries(
-      Object.entries(session.counts).map(([key, value]) => [key, Math.round((value / totalVoices) * 100)]),
-    ) as VoiceProbabilities;
-    const result: PracticeResult = {
-      id: String(Date.now()),
-      date: new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date()),
-      score: Math.round((pitchAccuracy + stability + connection) / 3),
-      pitchAccuracy,
-      stability,
-      connection,
-      durationSeconds: Math.max(1, Math.round((Date.now() - session.startedAt) / 1000)),
-      range: session.maxMidi > 0 ? `${midiToNote(session.minMidi)}–${midiToNote(session.maxMidi)}` : "측정되지 않음",
-      distribution,
-    };
+  function saveResult(result: PracticeResult) {
     const nextHistory = [result, ...history].slice(0, 20);
     setHistory(nextHistory);
     setLastResult(result);
     setActiveTab("analysis");
     localStorage.setItem("voicepath-history", JSON.stringify(nextHistory));
-  }
-
-  function goTo(tab: Tab) {
-    setActiveTab(tab);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -628,7 +173,7 @@ export function VoicePathApp() {
               <div className="section-heading"><h2>빠른 시작</h2></div>
               <div className="quick-grid">
                 <button className="quick-card" type="button" onClick={() => goTo("practice")}>
-                  <span className="quick-icon">♪</span><strong>음계 연습</strong><small>반음씩 올라가며 피치 확인</small>
+                  <span className="quick-icon">♪</span><strong>음계 연습</strong><small>원하는 시작음으로 피치 확인</small>
                 </button>
                 <button className="quick-card" type="button" onClick={() => goTo("learn")}>
                   <span className="quick-icon">▤</span><strong>발성 배우기</strong><small>그림으로 내는 방법 익히기</small>
@@ -639,9 +184,9 @@ export function VoicePathApp() {
               <article className="surface-card recent-card">
                 {lastResult ? (
                   <>
-                    <div className="card-topline"><div><strong>5음계 상승 연습</strong><small>{lastResult.date} · {lastResult.range}</small></div><span className="score-number">{lastResult.score}</span></div>
-                    <div className="progress-track"><span style={{ width: `${lastResult.score}%` }} /></div>
-                    <p>{lastResult.connection >= 75 ? "성구 전환이 비교적 부드럽게 이어졌어요." : "중성 구간에서 볼륨을 줄이며 연결해보세요."}</p>
+                    <div className="card-topline"><div><strong>5음계 발성 연습</strong><small>{lastResult.date} · {lastResult.range}</small></div><span className="score-number">{lastResult.quality?.reliable === false ? "보류" : lastResult.score}</span></div>
+                    <div className="progress-track"><span style={{ width: `${lastResult.quality?.reliable === false ? lastResult.quality.confidence : lastResult.score}%` }} /></div>
+                    <p>{resultSummary(lastResult)}</p>
                   </>
                 ) : (
                   <div className="empty-state"><span>🎙️</span><strong>첫 연습을 시작해보세요</strong><p>연습 후 피치와 발성 추정 결과가 여기에 표시됩니다.</p></div>
@@ -690,130 +235,15 @@ export function VoicePathApp() {
           )}
 
           {activeTab === "practice" && (
-            <section aria-label="실시간 연습">
-              <div className="section-heading"><div><p className="eyebrow">실시간 연습</p><h2>5음계 상승 연습</h2></div><span className="set-badge">{setShift + 1} / 6세트</span></div>
-
-              <article className="surface-card settings-card">
-                <label>시작음
-                  <select value={startMidi} disabled={isPracticing} onChange={(event) => setStartMidi(Number(event.target.value))}>
-                    <option value={57}>A3</option><option value={59}>B3</option><option value={60}>C4</option><option value={62}>D4</option><option value={64}>E4</option>
-                  </select>
-                </label>
-                <label>연습 모음
-                  <select value={vowel} disabled={isPracticing} onChange={(event) => setVowel(event.target.value)}>
-                    <option>우</option><option>이</option><option>아</option><option>네</option><option>멈</option>
-                  </select>
-                </label>
-                <label className="tempo-control">속도 <strong>{tempo} BPM</strong>
-                  <input type="range" min="56" max="100" step="2" value={tempo} disabled={isPracticing} onChange={(event) => setTempo(Number(event.target.value))} />
-                </label>
-                <button
-                  className="primary-button reference-button"
-                  type="button"
-                  disabled={isPracticing || referenceStatus === "playing"}
-                  aria-busy={referenceStatus === "playing"}
-                  onClick={playReferenceScale}
-                >
-                  <span className={referenceStatus === "playing" ? "play-indicator playing" : "play-indicator"} aria-hidden="true">
-                    {referenceStatus === "done" ? "↻" : "▶"}
-                  </span>
-                  {referenceStatus === "playing" ? "기준 음계 재생 중…" : referenceStatus === "done" ? "기준 음계 다시 듣기" : "기준 음계 듣기"}
-                </button>
-                <p className={`audio-status ${referenceStatus}`} aria-live="polite">
-                  {referenceStatus === "playing" ? "도–레–미–파–솔–파–미–레–도를 재생하고 있어요." : referenceStatus === "done" ? "기준 음계 재생이 끝났어요." : "버튼을 누르면 아이폰 스피커로 기준 음계가 재생돼요."}
-                </p>
-              </article>
-
-              <article className="surface-card scale-card">
-                <div className="card-topline"><strong>{midiToNote(startMidi + setShift)} 시작 · ‘{vowel}’</strong><span>반음씩 상승</span></div>
-                <div className="scale-path" aria-label="도 레 미 파 솔 파 미 레 도">
-                  {scaleNames.map((name, index) => (
-                    <button
-                      type="button"
-                      key={`${name}-${index}`}
-                      className={activeIndex === index ? "active" : ""}
-                      aria-pressed={activeIndex === index}
-                      onClick={() => setActiveIndex(index)}
-                    >{name}</button>
-                  ))}
-                </div>
-                <div className="manual-note-controls" aria-label="목표 음정 수동 이동">
-                  <button type="button" disabled={activeIndex === 0} onClick={() => movePracticeNote(-1)}>← 이전 음</button>
-                  <strong>{targetNote}</strong>
-                  <button type="button" disabled={activeIndex === scaleIntervals.length - 1} onClick={() => movePracticeNote(1)}>다음 음 →</button>
-                </div>
-                <div className="manual-set-controls" aria-label="연습 세트 수동 이동">
-                  <button type="button" disabled={setShift === 0} onClick={() => movePracticeSet(-1)}>− 이전 세트</button>
-                  <span>세트는 직접 눌러야 바뀝니다</span>
-                  <button type="button" disabled={setShift === 5} onClick={() => movePracticeSet(1)}>다음 세트 +반음</button>
-                </div>
-              </article>
-
-              <article className="pitch-card">
-                {isPracticing && (
-                  <div className={`microphone-status ${microphoneStatus}`} role="status">
-                    <span aria-hidden="true" />
-                    <strong>{microphoneStatus === "requesting" ? "마이크 연결 중" : microphoneStatus === "hearing" ? "목소리 감지 중" : microphoneStatus === "blocked" ? "마이크 확인 필요" : "마이크 연결됨"}</strong>
-                  </div>
-                )}
-                <span>목표 음정</span><h2>{targetNote}</h2>
-                <div className="pitch-track"><span className="pitch-marker" style={{ "--pitch-position": `${clamp(50 + (pitchDifference ?? 0) / 2, 4, 96)}%` } as CSSProperties} /></div>
-                <div className="pitch-labels"><span>낮음</span><strong>{pitchDifference === null ? "소리를 기다리는 중" : Math.abs(pitchDifference) <= 15 ? `${pitchDifference >= 0 ? "+" : ""}${pitchDifference} cent · 정확해요` : pitchDifference < 0 ? `${pitchDifference} cent · 조금 높여보세요` : `+${pitchDifference} cent · 조금 낮춰보세요`}</strong><span>높음</span></div>
-                <div className="detected-row"><span>현재 음정</span><strong>{detectedNote}</strong><span>입력 {inputLevel}%</span></div>
-                <div className="microphone-level" aria-label={`마이크 입력 세기 ${inputLevel}퍼센트`}><span style={{ width: `${inputLevel}%` }} /></div>
-                {isPracticing && detectedMidi === null && <p className="microphone-tip">휴대폰 아래쪽 마이크를 막지 말고 ‘아—’ 또는 ‘우—’를 1~2초 길게 내보세요.</p>}
-              </article>
-
-              <article className="surface-card voice-estimate">
-                <div className="card-topline"><div><strong>현재 발성 추정</strong><small>마이크 음향 특징 기반</small></div><span className="type-label">{koreanVoiceNames[topVoice]}</span></div>
-                {(Object.entries(probabilities) as [keyof VoiceProbabilities, number][]).sort((a, b) => b[1] - a[1]).map(([key, value]) => (
-                  <div className="meter" key={key}><div><span>{koreanVoiceNames[key]}</span><strong>{value}%</strong></div><div className="meter-track"><span style={{ width: `${value}%` }} /></div></div>
-                ))}
-                <p className="estimate-note">발성 분류는 실험적 추정치이며 성대 상태를 의학적으로 판정하지 않습니다.</p>
-              </article>
-
-              {error && <p className="error-message" role="alert">{error}</p>}
-              <div className="practice-actions">
-                {isPracticing ? <button className="stop-button" type="button" onClick={finishPractice}>연습 종료·분석</button> : <button className="primary-button" type="button" onClick={startPractice}>마이크 연습 시작</button>}
-                <p className="silent-practice-note">마이크 연습 중에는 배경음이 나오지 않으며 음정도 자동으로 바뀌지 않습니다.</p>
-              </div>
-            </section>
+            <PracticeLab
+              selectedVoice={selectedVoice}
+              onSelectedVoiceChange={setSelectedVoice}
+              onComplete={saveResult}
+            />
           )}
 
           {activeTab === "analysis" && (
-            <section aria-label="연습 분석">
-              {lastResult ? (
-                <>
-                  <article className="surface-card result-hero">
-                    <div><p className="eyebrow">최근 연습 결과</p><h2>{lastResult.score >= 80 ? "성구 연결이 좋아지고 있어요" : "천천히 연결을 다듬어봐요"}</h2><span>{formatDuration(lastResult.durationSeconds)} · {lastResult.range}</span></div>
-                    <div className="score-ring"><strong>{lastResult.score}</strong><small>점</small></div>
-                  </article>
-
-                  <div className="section-heading"><h2>연습 지표</h2></div>
-                  <article className="surface-card metric-list">
-                    {[
-                      ["피치 정확도", lastResult.pitchAccuracy],
-                      ["성구 연결", lastResult.connection],
-                      ["음정 안정성", lastResult.stability],
-                    ].map(([label, value]) => (
-                      <div className="result-meter" key={String(label)}><div><span>{label}</span><strong>{value}%</strong></div><div className="progress-track"><span style={{ width: `${value}%` }} /></div></div>
-                    ))}
-                  </article>
-
-                  <div className="section-heading"><h2>발성 추정 비율</h2></div>
-                  <article className="surface-card distribution-card">
-                    {(Object.entries(lastResult.distribution) as [keyof VoiceProbabilities, number][]).map(([key, value]) => (
-                      <div key={key}><span>{koreanVoiceNames[key]}</span><strong>{value}%</strong></div>
-                    ))}
-                  </article>
-
-                  <article className="coaching-card"><span>다음 연습 포인트</span><strong>{lastResult.connection >= 75 ? "현재 음량을 유지하며 시작음을 반음 높여보세요." : "중성 구간에서 볼륨을 조금 줄이고 ‘우’로 연결해보세요."}</strong></article>
-                  <button className="primary-button" type="button" onClick={() => goTo("practice")}>다시 연습하기</button>
-                </>
-              ) : (
-                <div className="surface-card empty-state large"><span>▥</span><h2>아직 분석 결과가 없어요</h2><p>마이크 연습을 완료하면 피치 정확도와 발성 변화를 확인할 수 있어요.</p><button className="primary-button" type="button" onClick={() => goTo("practice")}>첫 연습 시작</button></div>
-              )}
-            </section>
+            <AnalysisExperience result={lastResult} onRetry={() => goTo("practice")} />
           )}
 
           {activeTab === "history" && (
@@ -822,7 +252,7 @@ export function VoicePathApp() {
               <article className="surface-card history-card">
                 {history.length ? history.map((result) => (
                   <button type="button" className="history-row" key={result.id} onClick={() => { setLastResult(result); goTo("analysis"); }}>
-                    <span className="history-icon">↗</span><span><strong>5음계 상승 연습</strong><small>{result.date} · {result.range}</small></span><b>{result.score}</b>
+                    <span className="history-icon">↗</span><span><strong>5음계 발성 연습</strong><small>{result.date} · {result.range}</small></span><b>{result.quality?.reliable === false ? "보류" : result.score}</b>
                   </button>
                 )) : <div className="empty-state"><span>◷</span><strong>기록이 아직 없어요</strong><p>완료한 연습은 이 기기에 저장됩니다.</p></div>}
               </article>
