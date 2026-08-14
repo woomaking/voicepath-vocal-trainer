@@ -60,6 +60,17 @@ test("starter preview is removed and product metadata is present", async () => {
   assert.match(practiceLab, /원본 보존형 F0 정규화/);
   assert.match(inputSensitivity, /작지만 깨끗하게 입력되고 있어요/);
   assert.match(practiceLab, /배음·음량·발성 평가는 원본 신호를 사용/);
+  assert.match(practiceLab, /업그레이드 분석/);
+  assert.match(practiceLab, /기존 분석/);
+  assert.match(practiceLab, /평가기준 설명/);
+  assert.match(practiceLab, /양호/);
+  assert.match(practiceLab, /보완/);
+  assert.match(practiceLab, /부족/);
+  const voiceEvaluation = await readFile(new URL("../lib/voiceEvaluation.ts", import.meta.url), "utf8");
+  assert.match(voiceEvaluation, /VOICE_EVALUATION_PROFILES/);
+  assert.match(voiceEvaluation, /음정/);
+  assert.match(voiceEvaluation, /배음 \/ 음질/);
+  assert.match(voiceEvaluation, /공명 \/ 연결/);
   assert.doesNotMatch(voicePathApp, /setInterval|createOscillator|playTone\(/);
   assert.doesNotMatch(practiceLab, /setInterval|createOscillator|playTone\(/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));

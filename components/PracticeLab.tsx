@@ -10,6 +10,14 @@ import {
   rmsToDbfs,
   type InputSignalState,
 } from "../lib/inputSensitivity";
+import {
+  buildVoiceEvaluation,
+  evaluationTolerance,
+  formatEvaluationTarget,
+  VOICE_EVALUATION_PROFILES,
+  type EvaluationMetric,
+  type EvaluationState,
+} from "../lib/voiceEvaluation";
 
 export type TrainingVoice = "chest" | "middle" | "head" | "falsetto" | "mix";
 export type VoiceProbabilities = Record<"chest" | "middle" | "head" | "falsetto", number>;
@@ -32,6 +40,7 @@ export type AcousticMetrics = {
   hnr: number | null;
   cpp: number | null;
   formants: [number | null, number | null, number | null];
+  formantContinuity: number;
   timbreContinuity: number;
   pitchJumps: number;
   volumeContinuity: number;
@@ -454,6 +463,15 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
   }) as [number | null, number | null, number | null];
   const adjacent = alignedGroups.flatMap((group) => group.slice(1).map((frame, index) => [group[index], frame] as const))
     .filter(([a, b]) => b.time - a.time < 0.24);
+  const formantChanges = adjacent.flatMap(([a, b]) => {
+    const changes = a.formants.map((value, index) => {
+      const next = b.formants[index];
+      if (value === null || next === null) return null;
+      return Math.abs(next - value) / Math.max((next + value) / 2, 1);
+    }).filter((value): value is number => value !== null);
+    return changes.length ? [mean(changes)] : [];
+  });
+  const formantContinuity = formantChanges.length ? Math.round(clamp(100 - mean(formantChanges) * 280, 0, 100)) : 0;
   const timbreChanges = adjacent.filter(([a, b]) => a.timbre && b.timbre).map(([a, b]) => timbreDistance(a.timbre!, b.timbre!));
   const timbreContinuity = Math.round(clamp(100 - mean(timbreChanges) * 125, 0, 100));
   const pitchJumps = adjacent.filter(([a, b]) => Math.abs((b.exactMidi! - a.exactMidi!) * 100) > 115).length;
@@ -494,7 +512,7 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
   const f0Mean = valid.length ? mean(valid.map((frame) => frame.frequency)) : null;
   const metrics: AcousticMetrics = {
     f0Mean, pitchAccuracy, pitchStability, rawLevelDbfs, relativeVolumeDb, h1h2, spectralTilt, highHarmonicRatio, hnr, cpp, formants,
-    timbreContinuity, pitchJumps, volumeContinuity, vibratoRate, vibratoExtent, vibratoRegularity, jitter, shimmer, onset,
+    formantContinuity, timbreContinuity, pitchJumps, volumeContinuity, vibratoRate, vibratoExtent, vibratoRegularity, jitter, shimmer, onset,
     voicedDuration, totalDuration, noteResults: alignment.notes,
   };
   const voicedRatio = frames.length ? valid.length / frames.length : 0;
@@ -791,7 +809,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
 
 type AnalysisExperienceProps = { result: PracticeResult | null; onRetry: () => void };
 
-export function AnalysisExperience({ result, onRetry }: AnalysisExperienceProps) {
+function LegacyAnalysisExperience({ result, onRetry }: AnalysisExperienceProps) {
   const [retryResultId, setRetryResultId] = useState<string | null>(null);
   if (!result || !result.metrics || !result.quality) return <div className="surface-card empty-state large"><span>▥</span><h2>아직 분석 결과가 없어요</h2><p>마이크 연습을 완료하면 전체 음향 지표와 발성 유사도를 확인할 수 있어요.</p><button className="primary-button" type="button" onClick={onRetry}>첫 연습 시작</button></div>;
   const { metrics, quality } = result;
@@ -850,5 +868,102 @@ export function AnalysisExperience({ result, onRetry }: AnalysisExperienceProps)
     <div className="section-heading"><h2>분석 근거</h2></div>
     <article className="surface-card analysis-basis"><strong>{topVoice[1]}%의 {FOUR_VOICE_NAMES[topVoice[0]]} 소리 패턴이 가장 가깝게 나타났어요.</strong><p>작은 입력은 피치 검출 계산에서만 정규화했고, H1-H2·배음 감소·HNR·CPP·Shimmer·원본 음량과 전환 연속성은 증폭하지 않은 마이크 신호로 분석했습니다. 피치는 녹음 후 각 음의 유지 구간을 목표 음계 순서에 맞춰 비교했습니다. 마이크 분석은 성대 진동기전을 직접 확인하는 의학적 검사가 아닙니다.</p></article>
     <button className="primary-button" type="button" onClick={onRetry}>같은 설정으로 다시 연습</button>
+  </section>;
+}
+
+type AnalysisVersion = "upgrade" | "legacy";
+
+const EVALUATION_STATE_LABELS: Record<EvaluationState, string> = {
+  good: "양호",
+  watch: "보완",
+  low: "부족",
+  unavailable: "측정 부족",
+};
+
+function formatEvaluationValue(metric: EvaluationMetric) {
+  if (metric.value === null || !Number.isFinite(metric.value)) return "측정 데이터 부족";
+  const digits = metric.unit === "dB" ? 1 : 0;
+  return `${metric.value.toFixed(digits)}${metric.unit}`;
+}
+
+function UpgradedAnalysisExperience({ result, onRetry }: AnalysisExperienceProps) {
+  const [showCriteria, setShowCriteria] = useState(false);
+  if (!result || !result.metrics || !result.quality || !result.quality.reliable) {
+    return <LegacyAnalysisExperience result={result} onRetry={onRetry} />;
+  }
+  const { metrics, quality } = result;
+  const selectedVoice = result.selectedVoice ?? "head";
+  const evaluation = buildVoiceEvaluation(selectedVoice, {
+    pitchAccuracy: metrics.pitchAccuracy,
+    pitchStability: metrics.pitchStability,
+    noteCoverage: quality.noteCoverage ?? null,
+    pitchJumps: metrics.pitchJumps,
+    h1h2: metrics.h1h2,
+    hnr: metrics.hnr,
+    cpp: metrics.cpp,
+    highHarmonic: metrics.highHarmonicRatio,
+    formantContinuity: metrics.formantContinuity ?? metrics.timbreContinuity,
+    timbreContinuity: metrics.timbreContinuity,
+    volumeContinuity: metrics.volumeContinuity,
+    connection: result.connection,
+  });
+  const profile = VOICE_EVALUATION_PROFILES[selectedVoice];
+
+  return <section className="upgraded-analysis" aria-label="업그레이드 분석 결과">
+    <article className="surface-card result-hero upgraded-result-hero">
+      <div><p className="eyebrow">업그레이드 분석 · 신뢰도 {quality.confidence}%</p><h2>{evaluation.label} 목표 적합도</h2><span>{result.target} · {result.range}</span></div>
+      <div className="score-ring"><strong>{evaluation.score}</strong><small>점</small></div>
+    </article>
+
+    <div className="evaluation-status-row">
+      <div className="evaluation-legend" aria-label="평가 상태">
+        <span><i className="evaluation-good" />양호</span><span><i className="evaluation-watch" />보완</span><span><i className="evaluation-low" />부족</span>
+      </div>
+      <button type="button" className="criteria-help-button" aria-label="평가기준 설명" aria-expanded={showCriteria} onClick={() => setShowCriteria((current) => !current)}>?</button>
+    </div>
+
+    {showCriteria && <article className="surface-card criteria-help-panel">
+      <div className="card-topline"><div><p className="eyebrow">평가기준 설명</p><h3>{profile.label} 초기 목표 범위</h3></div><button type="button" onClick={() => setShowCriteria(false)}>닫기</button></div>
+      <p>녹색은 목표 범위 안, 노란색은 목표 범위 폭의 28% 또는 2단위 이내, 빨간색은 그보다 크게 벗어난 값이에요. 측정 데이터가 부족한 항목은 색상 평가하지 않아요.</p>
+      <div className="criteria-color-rules"><span><i className="evaluation-good" /><b>양호</b> 목표 범위 안</span><span><i className="evaluation-watch" /><b>보완</b> 허용 오차 안</span><span><i className="evaluation-low" /><b>부족</b> 허용 오차 밖</span></div>
+      <div className="criteria-target-list">{evaluation.sections.flatMap((section) => section.metrics).map((metric) => <div key={metric.key}><span>{metric.label}</span><strong>{formatEvaluationTarget(metric.range, metric.unit)}</strong><small>허용 오차 ±{evaluationTolerance(metric.range).toFixed(1)}{metric.unit}</small></div>)}</div>
+      <p className="criteria-caution">현재 범위는 비교 화면을 위한 초기 교육용 기준이며 의학적 정상 범위가 아닙니다. 사용자 데이터가 쌓이면 성별·음역·모음·개인 기준선으로 보정할 예정이에요.</p>
+    </article>}
+
+    {evaluation.sections.map((section) => <section className="surface-card evaluation-section" key={section.key} aria-labelledby={`evaluation-${section.key}`}>
+      <div className="evaluation-section-heading"><div><h3 id={`evaluation-${section.key}`}>{section.title}</h3><p>{section.subtitle}</p></div><span>{section.metrics.length}개 항목</span></div>
+      <div className="evaluation-metric-grid">{section.metrics.map((metric) => <article className={`evaluation-metric evaluation-${metric.state}`} key={metric.key}>
+        <div className="evaluation-metric-heading"><strong>{metric.label}</strong><span>{EVALUATION_STATE_LABELS[metric.state]}</span></div>
+        <div className="evaluation-values"><b>{formatEvaluationValue(metric)}</b><small>목표 {formatEvaluationTarget(metric.range, metric.unit)}</small></div>
+        <div className="evaluation-score-track" aria-label={`${metric.label} ${EVALUATION_STATE_LABELS[metric.state]}`}><span style={{ width: `${Math.max(metric.score ?? 0, 3)}%` }} /></div>
+        <p>{metric.state === "good" ? `${evaluation.label} 목표 범위가 잘 유지되고 있어요.` : metric.state === "unavailable" ? "분석 가능한 측정값이 부족해 재측정이 필요해요." : metric.tip}</p>
+      </article>)}</div>
+    </section>)}
+
+    <article className="surface-card upgraded-analysis-basis"><strong>측정값과 {evaluation.label} 목표 프로필을 비교했어요.</strong><p>피치는 정규화된 검출값을 음계 순서에 맞춰 평가하고, 배음·음질·공명·연결은 증폭하지 않은 원본 마이크 신호를 사용했습니다.</p></article>
+    <button className="primary-button" type="button" onClick={onRetry}>같은 설정으로 다시 연습</button>
+  </section>;
+}
+
+export function AnalysisExperience(props: AnalysisExperienceProps) {
+  const [version, setVersion] = useState<AnalysisVersion>(() => {
+    if (typeof window === "undefined") return "upgrade";
+    return localStorage.getItem("voicepath-analysis-version") === "legacy" ? "legacy" : "upgrade";
+  });
+
+  function changeVersion(next: AnalysisVersion) {
+    setVersion(next);
+    localStorage.setItem("voicepath-analysis-version", next);
+  }
+
+  return <section className="analysis-version-shell" aria-label="분석 화면 버전 선택">
+    <article className="surface-card analysis-version-card">
+      <div><p className="eyebrow">분석 화면 버전</p><strong>{version === "upgrade" ? "업그레이드 분석을 보고 있어요" : "기존 분석을 보고 있어요"}</strong></div>
+      <div className="analysis-version-switch" role="group" aria-label="분석 화면 버전">
+        <button type="button" aria-pressed={version === "upgrade"} onClick={() => changeVersion("upgrade")}>업그레이드</button>
+        <button type="button" aria-pressed={version === "legacy"} onClick={() => changeVersion("legacy")}>기존 분석</button>
+      </div>
+    </article>
+    {version === "upgrade" ? <UpgradedAnalysisExperience {...props} /> : <LegacyAnalysisExperience {...props} />}
   </section>;
 }

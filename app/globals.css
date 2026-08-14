@@ -1776,6 +1776,348 @@ input:focus-visible {
   background: #79a8db;
 }
 
+.analysis-version-card {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px;
+}
+
+.analysis-version-card > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.analysis-version-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.analysis-version-switch button {
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.analysis-version-switch button[aria-pressed="true"] {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: white;
+}
+
+.upgraded-result-hero {
+  border-color: #cce5dc;
+  background: linear-gradient(145deg, var(--brand-pale), var(--surface));
+}
+
+.evaluation-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: 12px 2px;
+}
+
+.evaluation-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.evaluation-legend span,
+.criteria-color-rules span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.evaluation-legend i,
+.criteria-color-rules i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+i.evaluation-good {
+  background: var(--brand);
+}
+
+i.evaluation-watch {
+  background: var(--amber);
+}
+
+i.evaluation-low {
+  background: var(--danger);
+}
+
+.criteria-help-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--brand-dark);
+  font-weight: 850;
+}
+
+.criteria-help-button[aria-expanded="true"] {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.criteria-help-panel {
+  margin-bottom: 14px;
+  border-color: #cce5dc;
+}
+
+.criteria-help-panel .card-topline {
+  align-items: flex-start;
+}
+
+.criteria-help-panel .card-topline h3 {
+  margin: 4px 0 0;
+}
+
+.criteria-help-panel .card-topline button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.criteria-help-panel > p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.criteria-color-rules {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 13px 0;
+}
+
+.criteria-color-rules span {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  padding: 9px;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.criteria-color-rules b {
+  color: var(--ink);
+}
+
+.criteria-target-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.criteria-target-list > div {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.criteria-target-list span,
+.criteria-target-list small {
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+
+.criteria-target-list strong {
+  color: var(--brand-dark);
+  font-size: 0.82rem;
+}
+
+.criteria-help-panel .criteria-caution {
+  margin: 12px 0 0;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--amber-soft);
+  color: #855118;
+}
+
+.evaluation-section {
+  margin-top: 14px;
+  padding: 16px;
+}
+
+.evaluation-section-heading,
+.evaluation-metric-heading,
+.evaluation-values {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.evaluation-section-heading {
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.evaluation-section-heading h3,
+.evaluation-section-heading p {
+  margin: 0;
+}
+
+.evaluation-section-heading p,
+.evaluation-section-heading > span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.evaluation-section-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.evaluation-section-heading > span {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--brand-pale);
+  color: var(--brand-dark);
+}
+
+.evaluation-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.evaluation-metric {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--surface-soft);
+}
+
+.evaluation-metric-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+
+.evaluation-metric-heading span {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.evaluation-good .evaluation-metric-heading span {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.evaluation-watch .evaluation-metric-heading span {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.evaluation-low .evaluation-metric-heading span {
+  background: #fcecee;
+  color: var(--danger);
+}
+
+.evaluation-unavailable .evaluation-metric-heading span {
+  background: #edf1ef;
+  color: var(--muted);
+}
+
+.evaluation-values {
+  align-items: baseline;
+  margin-top: 10px;
+}
+
+.evaluation-values b {
+  font-size: 1rem;
+}
+
+.evaluation-values small {
+  color: var(--muted);
+  text-align: right;
+}
+
+.evaluation-score-track {
+  height: 7px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.evaluation-score-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.evaluation-good .evaluation-score-track span {
+  background: var(--brand);
+}
+
+.evaluation-watch .evaluation-score-track span {
+  background: var(--amber);
+}
+
+.evaluation-low .evaluation-score-track span {
+  background: var(--danger);
+}
+
+.evaluation-unavailable .evaluation-score-track span {
+  background: var(--muted);
+}
+
+.evaluation-metric > p {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.upgraded-analysis-basis {
+  margin-top: 14px;
+}
+
+.upgraded-analysis-basis p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+@media (max-width: 480px) {
+  .evaluation-metric-grid,
+  .criteria-target-list {
+    grid-template-columns: 1fr;
+  }
+
+  .criteria-color-rules {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 359px) {
   .note-choice-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
