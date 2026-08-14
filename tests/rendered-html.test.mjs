@@ -41,7 +41,10 @@ test("starter preview is removed and product metadata is present", async () => {
   assert.match(layout, /lang="ko"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.match(voicePathApp, /PracticeLab/);
-  const practiceLab = await readFile(new URL("../components/PracticeLab.tsx", import.meta.url), "utf8");
+  const [practiceLab, inputSensitivity] = await Promise.all([
+    readFile(new URL("../components/PracticeLab.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/inputSensitivity.ts", import.meta.url), "utf8"),
+  ]);
   assert.match(practiceLab, /다음 세트 \+반음/);
   assert.match(practiceLab, /H1-H2/);
   assert.match(practiceLab, /스펙트럼 기울기/);
@@ -54,6 +57,9 @@ test("starter preview is removed and product metadata is present", async () => {
   assert.match(practiceLab, /음별 피치 비교/);
   assert.match(practiceLab, /녹음 후 순서 정렬/);
   assert.match(practiceLab, /alignPitchSequence/);
+  assert.match(practiceLab, /원본 보존형 F0 정규화/);
+  assert.match(inputSensitivity, /작지만 깨끗하게 입력되고 있어요/);
+  assert.match(practiceLab, /배음·음량·발성 평가는 원본 신호를 사용/);
   assert.doesNotMatch(voicePathApp, /setInterval|createOscillator|playTone\(/);
   assert.doesNotMatch(practiceLab, /setInterval|createOscillator|playTone\(/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));

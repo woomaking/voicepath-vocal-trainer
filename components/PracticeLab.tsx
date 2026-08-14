@@ -2,6 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { alignPitchSequence, type AlignedPitchNote } from "../lib/pitchAlignment";
+import {
+  adaptivePitchThreshold,
+  assessInputSignal,
+  normalizeForPitch,
+  requiresQuietRemeasure,
+  rmsToDbfs,
+  type InputSignalState,
+} from "../lib/inputSensitivity";
 
 export type TrainingVoice = "chest" | "middle" | "head" | "falsetto" | "mix";
 export type VoiceProbabilities = Record<"chest" | "middle" | "head" | "falsetto", number>;
@@ -16,6 +24,7 @@ export type AcousticMetrics = {
   f0Mean: number | null;
   pitchAccuracy: number;
   pitchStability: number;
+  rawLevelDbfs: number | null;
   relativeVolumeDb: number | null;
   h1h2: number | null;
   spectralTilt: number | null;
@@ -133,7 +142,7 @@ export const REMEASUREMENT_GUIDANCE = [
 ] as const;
 
 const MEASUREMENT_GROUPS = [
-  { title: "음정", items: ["F0·현재 음정", "피치 정확도", "피치 안정도", "피치 점프", "비브라토", "Jitter 추정"] },
+  { title: "음정", items: ["원본 보존형 F0 정규화", "피치 정확도", "피치 안정도", "피치 점프", "비브라토", "Jitter 추정"] },
   { title: "배음·음질", items: ["상대 음량(RMS)", "H1·H2·배음", "H1-H2", "스펙트럼 기울기", "고배음 에너지", "HNR·CPP", "Shimmer 추정", "발성 시작"] },
   { title: "공명·연결", items: ["포먼트 F1·F2·F3", "음색 변화량", "음량 연속성", "발성 지속시간", "성구 연결"] },
 ];
@@ -226,28 +235,26 @@ function playUrl(url: string) {
 
 function detectPitch(buffer: Float32Array, sampleRate: number, threshold: number): PitchDetection {
   let sum = 0;
-  let average = 0;
   let peak = 0;
   let clipped = 0;
   for (let index = 0; index < buffer.length; index += 1) {
     const absolute = Math.abs(buffer[index]);
     sum += buffer[index] ** 2;
-    average += buffer[index];
     peak = Math.max(peak, absolute);
     if (absolute >= 0.985) clipped += 1;
   }
   const rms = Math.sqrt(sum / buffer.length);
   const base = { frequency: 0, exactMidi: null, rms, peak, clippingRatio: clipped / buffer.length, correlation: 0 };
   if (rms < threshold) return base;
-  average /= buffer.length;
+  const pitchBuffer = normalizeForPitch(buffer, rms);
   const minLag = Math.floor(sampleRate / 1000);
   const maxLag = Math.min(Math.floor(sampleRate / 65), buffer.length - 2);
   const difference = new Float32Array(maxLag + 1);
   const normalizedDifference = new Float32Array(maxLag + 1);
   for (let lag = 1; lag <= maxLag; lag += 1) {
     let value = 0;
-    for (let index = 0; index < buffer.length - lag; index += 2) {
-      const delta = (buffer[index] - average) - (buffer[index + lag] - average);
+    for (let index = 0; index < pitchBuffer.length - lag; index += 2) {
+      const delta = pitchBuffer[index] - pitchBuffer[index + lag];
       value += delta * delta;
     }
     difference[lag] = value;
@@ -434,6 +441,7 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
     .filter((error) => Math.abs(error - note.errorCents) < 600));
   const validRms = valid.map((frame) => frame.rms);
   const meanRms = mean(validRms);
+  const rawLevelDbfs = meanRms > 0 ? rmsToDbfs(meanRms) : null;
   const relativeVolumeDb = meanRms > 0 && noiseFloor > 0 ? 20 * Math.log10(meanRms / noiseFloor) : null;
   const h1h2 = averageNullable(valid.map((frame) => frame.h1h2));
   const spectralTilt = averageNullable(valid.map((frame) => frame.spectralTilt));
@@ -485,7 +493,7 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
       ? "숨이 섞인 부드러운 시작" : "균형 잡힌 시작";
   const f0Mean = valid.length ? mean(valid.map((frame) => frame.frequency)) : null;
   const metrics: AcousticMetrics = {
-    f0Mean, pitchAccuracy, pitchStability, relativeVolumeDb, h1h2, spectralTilt, highHarmonicRatio, hnr, cpp, formants,
+    f0Mean, pitchAccuracy, pitchStability, rawLevelDbfs, relativeVolumeDb, h1h2, spectralTilt, highHarmonicRatio, hnr, cpp, formants,
     timbreContinuity, pitchJumps, volumeContinuity, vibratoRate, vibratoExtent, vibratoRegularity, jitter, shimmer, onset,
     voicedDuration, totalDuration, noteResults: alignment.notes,
   };
@@ -495,10 +503,10 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
   const featureValues = [h1h2, spectralTilt, highHarmonicRatio, hnr, cpp, ...formants];
   const featureCoverage = Math.round((featureValues.filter((value) => value !== null).length / featureValues.length) * 100);
   const meanCorrelation = mean(valid.map((frame) => frame.correlation));
-  const ambiguousRatio = frames.length ? frames.filter((frame) => frame.rms > Math.max(noiseFloor * 2.2, 0.006) && frame.correlation < 0.42).length / frames.length : 1;
+  const ambiguousRatio = frames.length ? frames.filter((frame) => frame.rms > adaptivePitchThreshold(noiseFloor) && frame.correlation < 0.42).length / frames.length : 1;
   const coveredNotes = alignment.notes.filter((note) => note.sampleCount >= 3).length;
   const reasons: QualityReason[] = [];
-  if (meanRms < Math.max(0.009, noiseFloor * 2.1)) reasons.push({ code: "quiet", label: "입력 음량 부족", detail: "목소리가 분석 가능한 크기보다 작았어요." });
+  if (requiresQuietRemeasure(meanRms, snr)) reasons.push({ code: "quiet", label: "입력 신호 부족", detail: "목소리가 너무 작거나 주변 소음과 충분히 분리되지 않았어요." });
   if (clippingPercent > 0.12) reasons.push({ code: "clipping", label: "입력 찢어짐", detail: "너무 큰 입력으로 파형 일부가 잘렸어요." });
   if (noiseFloor > 0.027 || (snr !== null && snr < 8)) reasons.push({ code: "noise", label: "주변 소음", detail: "목소리와 주변 소리를 충분히 분리하지 못했어요." });
   if (voicedRatio < 0.48 || meanCorrelation < 0.5) reasons.push({ code: "pitch", label: "음정 검출 부족", detail: "안정적인 기본주파수 F0가 충분히 검출되지 않았어요." });
@@ -507,7 +515,7 @@ function analyzeSession(frames: FrameFeature[], noiseFloor: number, startMidi: n
   if (perNoteDb.length >= 5 && Math.max(...perNoteDb) - Math.min(...perNoteDb) > 14) reasons.push({ code: "movement", label: "위치 또는 음량 변화", detail: "연습 중 휴대폰 거리나 음량이 크게 달라졌어요." });
   const ratioScore = clamp((voicedRatio - 0.3) / 0.6, 0, 1) * 100;
   const correlationScore = clamp((meanCorrelation - 0.4) / 0.5, 0, 1) * 100;
-  const snrScore = snr === null ? 0 : clamp((snr - 5) / 20, 0, 1) * 100;
+  const snrScore = snr === null ? 0 : clamp((snr - 6) / 14, 0, 1) * 100;
   const clippingScore = clamp(100 - clippingPercent * 180, 0, 100);
   const durationScore = clamp(voicedDuration / Math.max(plannedDuration * 0.7, 1), 0, 1) * 100;
   let confidence = Math.round(ratioScore * 0.2 + correlationScore * 0.18 + snrScore * 0.15 + clippingScore * 0.1 + durationScore * 0.12 + featureCoverage * 0.15 + volumeContinuity * 0.1);
@@ -545,6 +553,8 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
   const [detectedNote, setDetectedNote] = useState("—");
   const [pitchDifference, setPitchDifference] = useState<number | null>(null);
   const [inputLevel, setInputLevel] = useState(0);
+  const [inputSignalState, setInputSignalState] = useState<InputSignalState>("waiting");
+  const [inputSignalMessage, setInputSignalMessage] = useState("마이크 입력을 기다리고 있어요.");
   const [progress, setProgress] = useState(0);
   const contextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -593,7 +603,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
     if (!analyser) return 0.004;
     const values: number[] = [];
     const waveform = new Float32Array(analyser.fftSize);
-    for (let sample = 0; sample < 6; sample += 1) {
+    for (let sample = 0; sample < 10; sample += 1) {
       await new Promise((resolve) => window.setTimeout(resolve, 80));
       analyser.getFloatTimeDomainData(waveform);
       values.push(Math.sqrt(mean(Array.from(waveform, (value) => value ** 2))));
@@ -634,8 +644,9 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
     const spectrum = new Float32Array(analyser.frequencyBinCount);
     analyser.getFloatTimeDomainData(waveform);
     analyser.getFloatFrequencyData(spectrum);
-    const threshold = Math.max(0.0045, noiseFloorRef.current * 2.1);
+    const threshold = adaptivePitchThreshold(noiseFloorRef.current);
     const pitch = detectPitch(waveform, analyser.context.sampleRate, threshold);
+    const inputAssessment = assessInputSignal(pitch.rms, pitch.peak, noiseFloorRef.current);
     const targetMidi = targetMidis[index];
     const spectral = pitch.frequency > 0 ? spectralFeatures(spectrum, analyser.context.sampleRate, analyser.fftSize, pitch.frequency) : null;
     const centsError = pitch.exactMidi === null ? null : (pitch.exactMidi - targetMidi) * 100;
@@ -645,7 +656,9 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
       centroid: spectral?.centroid ?? null, formants: spectral?.formants ?? [null, null, null], timbre: spectral?.timbre ?? null });
     setActiveIndex(index);
     setProgress(clamp((elapsed / recordingDurationRef.current) * 100, 0, 100));
-    setInputLevel(clamp(Math.round(pitch.rms * 2000), 0, 100));
+    setInputLevel(inputAssessment.levelPercent);
+    setInputSignalState(inputAssessment.state);
+    setInputSignalMessage(inputAssessment.label);
     if (pitch.exactMidi !== null) {
       setDetectedNote(midiToNote(pitch.exactMidi));
       setPitchDifference(Math.round(centsError ?? 0));
@@ -657,6 +670,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
 
   async function startGuidedPractice() {
     setError(""); stopMicrophone();
+    setInputSignalState("waiting"); setInputSignalMessage("마이크 입력을 기다리고 있어요.");
     try {
       setStage("checking");
       await openMicrophone();
@@ -695,6 +709,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
 
   function abortRecording() {
     stopMicrophone(); setStage("microphone"); setProgress(0); setDetectedNote("—"); setPitchDifference(null); setInputLevel(0);
+    setInputSignalState("waiting"); setInputSignalMessage("마이크 입력을 기다리고 있어요.");
   }
 
   if (["checking", "playing", "ding", "recording", "analyzing"].includes(stage)) {
@@ -717,6 +732,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
             <div className="session-scale" aria-label="도 레 미 파 솔 파 미 레 도">{SCALE_NAMES.map((name, index) => <span key={`${name}-${index}`} className={index === activeIndex ? "active" : ""}>{name}</span>)}</div>
             <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
             <div className="live-readout"><span>입력 {inputLevel}%</span><strong>{pitchDifference === null ? "음정을 기다리는 중" : `${pitchDifference >= 0 ? "+" : ""}${pitchDifference} cent`}</strong></div>
+            <p className={`input-signal-status ${inputSignalState}`}>{inputSignalMessage}</p>
             <button type="button" className="secondary-button" onClick={abortRecording}>녹음 중단</button>
           </>}
         </article>
@@ -765,7 +781,7 @@ export function PracticeLab({ selectedVoice, onSelectedVoiceChange, onComplete }
           <li>기준음계가 끝나고 ‘띵’ 소리가 나면 시작해요.</li>
           <li>에어팟보다 휴대폰 내장 마이크를 사용해요.</li>
         </ul></article>
-        <p className="silent-recording-note">녹음 중에는 배경음이 나오지 않으며 다음 세트도 자동으로 올라가지 않아요. 녹음 후 각 음의 유지 구간을 목표 음과 순서대로 다시 맞춰 평가해요.</p>
+        <p className="silent-recording-note">녹음 중에는 배경음이 나오지 않으며 다음 세트도 자동으로 올라가지 않아요. 작은 입력은 피치 검출용으로만 정규화하고, 배음·음량·발성 평가는 원본 신호를 사용해요.</p>
         {error && <p className="error-message" role="alert">{error}</p>}
         <button type="button" className="primary-button practice-start-button" onClick={startGuidedPractice}>연습하기</button>
       </>}
@@ -804,7 +820,7 @@ export function AnalysisExperience({ result, onRetry }: AnalysisExperienceProps)
   const metricRows = [
     ["F0·평균 음정", metrics.f0Mean ? `${midiToNote(69 + 12 * Math.log2(metrics.f0Mean / 440))} · ${metrics.f0Mean.toFixed(1)}Hz` : "측정 데이터 부족"],
     ["피치 정확도", `${metrics.pitchAccuracy}%`], ["피치 안정도", `${metrics.pitchStability}%`],
-    ["상대 음량·SNR", formatMetric(metrics.relativeVolumeDb, "dB")], ["H1-H2", formatMetric(metrics.h1h2, "dB")],
+    ["원본 입력 레벨", formatMetric(metrics.rawLevelDbfs, "dBFS")], ["신호 대 소음비", formatMetric(metrics.relativeVolumeDb, "dB")], ["H1-H2", formatMetric(metrics.h1h2, "dB")],
     ["스펙트럼 기울기", formatMetric(metrics.spectralTilt, "dB/oct")], ["고배음 에너지", formatMetric(metrics.highHarmonicRatio, "%")],
     ["HNR", formatMetric(metrics.hnr, "dB")], ["CPP 추정", formatMetric(metrics.cpp, "dB")],
     ["포먼트 F1·F2·F3", metrics.formants.every((value) => value !== null) ? metrics.formants.map((value) => `${Math.round(value!)}Hz`).join(" · ") : "일부 측정 데이터 부족"],
@@ -832,7 +848,7 @@ export function AnalysisExperience({ result, onRetry }: AnalysisExperienceProps)
     <div className="section-heading"><h2>전체 측정값</h2><span>마이크 음향 분석</span></div>
     <article className="surface-card acoustic-table"><dl>{metricRows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></article>
     <div className="section-heading"><h2>분석 근거</h2></div>
-    <article className="surface-card analysis-basis"><strong>{topVoice[1]}%의 {FOUR_VOICE_NAMES[topVoice[0]]} 소리 패턴이 가장 가깝게 나타났어요.</strong><p>피치는 녹음 후 각 음의 유지 구간을 목표 음계 순서에 맞춰 비교했고, 전환 구간은 정확도와 안정도 계산에서 줄여 반영했습니다. 발성 유사도에는 H1-H2, 배음 감소, HNR·CPP, 상대 음량과 전환 연속성을 함께 사용했습니다. 마이크 분석은 성대 진동기전을 직접 확인하는 의학적 검사가 아닙니다.</p></article>
+    <article className="surface-card analysis-basis"><strong>{topVoice[1]}%의 {FOUR_VOICE_NAMES[topVoice[0]]} 소리 패턴이 가장 가깝게 나타났어요.</strong><p>작은 입력은 피치 검출 계산에서만 정규화했고, H1-H2·배음 감소·HNR·CPP·Shimmer·원본 음량과 전환 연속성은 증폭하지 않은 마이크 신호로 분석했습니다. 피치는 녹음 후 각 음의 유지 구간을 목표 음계 순서에 맞춰 비교했습니다. 마이크 분석은 성대 진동기전을 직접 확인하는 의학적 검사가 아닙니다.</p></article>
     <button className="primary-button" type="button" onClick={onRetry}>같은 설정으로 다시 연습</button>
   </section>;
 }

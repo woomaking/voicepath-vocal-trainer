@@ -1500,6 +1500,44 @@ input:focus-visible {
   color: var(--ink);
 }
 
+.session-panel > .input-signal-status {
+  margin: -5px 0 14px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.input-signal-status.waiting {
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.input-signal-status.too-quiet {
+  border-color: #f0d7b5;
+  background: #fff7e9;
+  color: #8b561d;
+}
+
+.input-signal-status.usable-soft {
+  border-color: #cde7dc;
+  background: var(--soft-green);
+  color: var(--green-dark);
+}
+
+.input-signal-status.good {
+  border-color: #b9ded1;
+  background: #e8f7f1;
+  color: var(--green-dark);
+}
+
+.input-signal-status.too-loud {
+  border-color: #edc8cc;
+  background: #fff0f1;
+  color: var(--danger);
+}
+
 .unreliable-result {
   border-color: #edc8cc;
   background: linear-gradient(145deg, #fff0f1, var(--surface));
